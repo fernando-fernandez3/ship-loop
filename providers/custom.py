@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import TYPE_CHECKING
 
@@ -33,10 +34,7 @@ class Verifier(DeployVerifier):
                 config.script,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                env={
-                    "SHIPLOOP_COMMIT": commit_hash,
-                    "SHIPLOOP_SITE": site_url,
-                },
+                env={**os.environ, "SHIPLOOP_COMMIT": commit_hash, "SHIPLOOP_SITE": site_url},
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=config.timeout)
             output = stdout.decode(errors="replace").strip()

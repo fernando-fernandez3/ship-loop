@@ -4,12 +4,15 @@ import asyncio
 import logging
 import re
 import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..budget import BudgetTracker, UsageRecord, estimate_cost, parse_token_usage
-from ..config import MetaConfig, ShipLoopConfig
+from ..agent import record_agent_usage, run_agent
+from ..budget import BudgetTracker
+from ..config import ShipLoopConfig
+from ..learnings import LearningsEngine
+from ..preflight import run_preflight
+from ..reporting import Reporter
 from ..git_ops import (
     checkout,
     create_worktree,
@@ -19,9 +22,6 @@ from ..git_ops import (
     merge_branch,
     remove_worktree,
 )
-from ..learnings import LearningsEngine
-from ..preflight import PreflightResult, run_preflight
-from ..reporting import Reporter
 
 logger = logging.getLogger("shiploop.loop.meta")
 
@@ -53,18 +53,19 @@ async def run_meta_loop(
 
     reporter.meta_start()
 
-    # Discard uncommitted changes from failed repair attempts
     await discard_changes(repo)
 
     original_branch = await get_current_branch(repo)
 
-    # Step 1: Meta-analysis — ask agent WHY everything fails
     reporter.meta_analysis()
     failure_context = _build_failure_context(segment_name, segment_prompt, all_errors)
     meta_prompt = _build_meta_prompt(segment_name, num_experiments, failure_context)
 
-    meta_agent = await _run_agent(config.agent_command, meta_prompt, repo)
-    _record_usage(budget, segment_name, "meta-analysis", meta_agent)
+    meta_agent = await run_agent(
+        config.agent_command, meta_prompt, repo,
+        timeout=config.timeouts.agent,
+    )
+    record_agent_usage(budget, segment_name, "meta-analysis", meta_agent)
 
     if not meta_agent.success:
         reporter._print("   ❌ Meta-analysis agent failed")
@@ -72,11 +73,9 @@ async def run_meta_loop(
 
     reporter._print("   ✅ Meta-analysis complete")
 
-    # Step 2: Parse experiment prompts
     experiment_prompts = _parse_experiments(meta_agent.output, num_experiments, segment_prompt, failure_context)
 
-    # Step 3: Run experiments
-    candidates: list[tuple[int, int]] = []  # (experiment_num, diff_lines)
+    candidates: list[tuple[int, int]] = []
 
     for exp_num in range(1, num_experiments + 1):
         reporter.experiment_start(exp_num, num_experiments)
@@ -95,19 +94,25 @@ async def run_meta_loop(
             continue
 
         branch_name = f"experiment/{segment_name}-{exp_num}"
-        worktree_path = repo / f".shiploop-exp-{segment_name}-{exp_num}"
+        worktree_path = Path(tempfile.mkdtemp(prefix=f"shiploop-exp-{segment_name}-{exp_num}-"))
 
         try:
             await create_worktree(repo, branch_name, worktree_path)
 
-            agent_result = await _run_agent(config.agent_command, exp_prompt, worktree_path)
-            _record_usage(budget, segment_name, f"experiment-{exp_num}", agent_result)
+            agent_result = await run_agent(
+                config.agent_command, exp_prompt, worktree_path,
+                timeout=config.timeouts.agent,
+            )
+            record_agent_usage(budget, segment_name, f"experiment-{exp_num}", agent_result)
 
             if not agent_result.success:
                 reporter.experiment_result(exp_num, False)
                 continue
 
-            preflight_result = await run_preflight(config.preflight, worktree_path)
+            preflight_result = await run_preflight(
+                config.preflight, worktree_path,
+                timeout=config.timeouts.preflight,
+            )
 
             if preflight_result.passed:
                 diff_lines = await _count_diff_lines(worktree_path)
@@ -122,7 +127,6 @@ async def run_meta_loop(
         finally:
             await remove_worktree(repo, worktree_path)
 
-    # Step 4: Pick winner
     await checkout(repo, original_branch)
 
     if not candidates:
@@ -136,13 +140,11 @@ async def run_meta_loop(
             tags=["meta-failure", "needs-human"],
         )
 
-        # Cleanup experiment branches
         for exp_num in range(1, num_experiments + 1):
             await delete_branch(repo, f"experiment/{segment_name}-{exp_num}")
 
         return MetaResult(success=False, experiments_tried=num_experiments)
 
-    # Pick simplest diff as tiebreaker
     candidates.sort(key=lambda x: x[1])
     winner_num, winner_diff = candidates[0]
     winner_branch = f"experiment/{segment_name}-{winner_num}"
@@ -166,7 +168,6 @@ async def run_meta_loop(
         tags=["meta-success", f"experiment-{winner_num}"],
     )
 
-    # Cleanup experiment branches
     for exp_num in range(1, num_experiments + 1):
         await delete_branch(repo, f"experiment/{segment_name}-{exp_num}")
 
@@ -262,55 +263,3 @@ async def _count_diff_lines(cwd: Path) -> int:
     stdout, _ = await proc.communicate()
     lines = stdout.decode().strip().splitlines()
     return len(lines) if lines else 999
-
-
-@dataclass
-class _AgentResult:
-    success: bool
-    output: str = ""
-    error: str = ""
-    duration: float = 0.0
-
-
-async def _run_agent(agent_command: str, prompt: str, cwd: Path) -> _AgentResult:
-    with tempfile.NamedTemporaryFile(
-        mode="w", prefix="shiploop-meta-", suffix=".txt", delete=False,
-    ) as f:
-        f.write(prompt)
-        prompt_file = Path(f.name)
-
-    try:
-        start = time.monotonic()
-        proc = await asyncio.create_subprocess_shell(
-            f"cat {prompt_file} | {agent_command}",
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        stdout, _ = await proc.communicate()
-        duration = time.monotonic() - start
-        output = stdout.decode(errors="replace")
-
-        if proc.returncode != 0:
-            return _AgentResult(
-                success=False, output=output,
-                error=f"Exit code {proc.returncode}", duration=duration,
-            )
-        return _AgentResult(success=True, output=output, duration=duration)
-    finally:
-        prompt_file.unlink(missing_ok=True)
-
-
-def _record_usage(
-    budget: BudgetTracker, segment: str, loop: str, result: _AgentResult,
-) -> None:
-    tokens_in, tokens_out = parse_token_usage(result.output)
-    cost = estimate_cost(tokens_in, tokens_out)
-    budget.record_usage(UsageRecord(
-        segment=segment,
-        loop=loop,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        estimated_cost_usd=cost,
-        duration_seconds=result.duration,
-    ))

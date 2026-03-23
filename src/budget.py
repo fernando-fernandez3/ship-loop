@@ -109,6 +109,12 @@ def parse_token_usage(agent_output: str) -> tuple[int, int]:
     return tokens_in, tokens_out
 
 
+def estimate_from_prompt(prompt_length: int, duration_seconds: float, model: str = "default") -> tuple[int, int]:
+    estimated_input = max(prompt_length // 4, 100)
+    estimated_output = max(int(duration_seconds * 30), 200)
+    return estimated_input, estimated_output
+
+
 def estimate_cost(tokens_in: int, tokens_out: int, model: str = "default") -> float:
     pricing = MODEL_PRICING_PER_MILLION.get(model, MODEL_PRICING_PER_MILLION["default"])
     cost = (tokens_in * pricing["input"] + tokens_out * pricing["output"]) / 1_000_000

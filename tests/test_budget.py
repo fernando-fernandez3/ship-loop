@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from src.budget import BudgetConfig, BudgetTracker, UsageRecord, estimate_cost, parse_token_usage
+from src.budget import BudgetConfig, BudgetTracker, UsageRecord, estimate_cost, estimate_from_prompt, parse_token_usage
 
 
 @pytest.fixture
@@ -107,6 +107,48 @@ class TestTokenParsing:
         tokens_in, tokens_out = parse_token_usage("hello world")
         assert tokens_in == 0
         assert tokens_out == 0
+
+    def test_parse_claude_format(self):
+        output = "input tokens: 12345\noutput tokens: 6789"
+        tokens_in, tokens_out = parse_token_usage(output)
+        assert tokens_in == 12345
+        assert tokens_out == 6789
+
+    def test_parse_gpt_format_with_equals(self):
+        output = "input_tokens=1000\noutput_tokens=500"
+        tokens_in, tokens_out = parse_token_usage(output)
+        assert tokens_in == 1000
+        assert tokens_out == 500
+
+    def test_parse_large_numbers_with_commas(self):
+        output = "input_tokens: 1,234,567\noutput_tokens: 890,123"
+        tokens_in, tokens_out = parse_token_usage(output)
+        assert tokens_in == 1234567
+        assert tokens_out == 890123
+
+    def test_parse_empty_string(self):
+        tokens_in, tokens_out = parse_token_usage("")
+        assert tokens_in == 0
+        assert tokens_out == 0
+
+
+class TestEstimateFromPrompt:
+    def test_basic_estimation(self):
+        tokens_in, tokens_out = estimate_from_prompt(4000, 10.0)
+        assert tokens_in == 1000
+        assert tokens_out == 300
+
+    def test_minimum_floor_input(self):
+        tokens_in, tokens_out = estimate_from_prompt(0, 10.0)
+        assert tokens_in == 100
+
+    def test_minimum_floor_output(self):
+        tokens_in, tokens_out = estimate_from_prompt(4000, 0.0)
+        assert tokens_out == 200
+
+    def test_long_duration_scales_output(self):
+        tokens_in, tokens_out = estimate_from_prompt(4000, 60.0)
+        assert tokens_out == 1800
 
 
 class TestCostEstimate:

@@ -58,6 +58,12 @@ class MetaConfig(BaseModel):
     experiments: int = 3
 
 
+class TimeoutsConfig(BaseModel):
+    agent: int = 900
+    deploy: int = 300
+    preflight: int = 300
+
+
 class PreflightConfig(BaseModel):
     build: str | None = None
     lint: str | None = None
@@ -87,6 +93,7 @@ class ShipLoopConfig(BaseModel):
     repair: RepairConfig = RepairConfig()
     meta: MetaConfig = MetaConfig()
     budget: BudgetConfig = BudgetConfig()
+    timeouts: TimeoutsConfig = TimeoutsConfig()
     blocked_patterns: list[str] = []
     segments: list[SegmentConfig]
 

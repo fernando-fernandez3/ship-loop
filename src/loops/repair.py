@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
-import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..budget import BudgetTracker, UsageRecord, estimate_cost, parse_token_usage
-from ..config import RepairConfig, ShipLoopConfig
-from ..git_ops import get_diff, get_changed_files
+from ..agent import record_agent_usage, run_agent
+from ..budget import BudgetTracker
+from ..config import ShipLoopConfig
 from ..learnings import LearningsEngine
 from ..preflight import PreflightResult, run_preflight
 from ..reporting import Reporter
@@ -60,14 +57,19 @@ async def run_repair_loop(
             segment_name, attempt, last_preflight, repo,
         )
 
-        agent_result = await _run_repair_agent(config.agent_command, repair_prompt, repo)
-        _record_repair_usage(budget, segment_name, attempt, agent_result)
+        agent_result = await run_agent(
+            config.agent_command, repair_prompt, repo,
+            timeout=config.timeouts.agent,
+        )
+        record_agent_usage(budget, segment_name, f"repair-{attempt}", agent_result)
 
         if not agent_result.success:
             reporter.repair_failure(segment_name, attempt, f"Agent failed: {agent_result.error[:100]}")
             continue
 
-        preflight_result = await run_preflight(config.preflight, repo)
+        preflight_result = await run_preflight(
+            config.preflight, repo, timeout=config.timeouts.preflight,
+        )
 
         if preflight_result.passed:
             reporter.repair_success(segment_name, attempt)
@@ -118,58 +120,6 @@ so the code builds, lints, and tests cleanly.
 4. Ensure the project builds, lints, and tests pass
 5. Do NOT remove or disable tests to make them pass
 """
-
-
-@dataclass
-class _AgentResult:
-    success: bool
-    output: str = ""
-    error: str = ""
-    duration: float = 0.0
-
-
-async def _run_repair_agent(agent_command: str, prompt: str, cwd: Path) -> _AgentResult:
-    with tempfile.NamedTemporaryFile(
-        mode="w", prefix="shiploop-repair-", suffix=".txt", delete=False,
-    ) as f:
-        f.write(prompt)
-        prompt_file = Path(f.name)
-
-    try:
-        start = time.monotonic()
-        proc = await asyncio.create_subprocess_shell(
-            f"cat {prompt_file} | {agent_command}",
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        stdout, _ = await proc.communicate()
-        duration = time.monotonic() - start
-        output = stdout.decode(errors="replace")
-
-        if proc.returncode != 0:
-            return _AgentResult(
-                success=False, output=output,
-                error=f"Exit code {proc.returncode}", duration=duration,
-            )
-        return _AgentResult(success=True, output=output, duration=duration)
-    finally:
-        prompt_file.unlink(missing_ok=True)
-
-
-def _record_repair_usage(
-    budget: BudgetTracker, segment: str, attempt: int, result: _AgentResult,
-) -> None:
-    tokens_in, tokens_out = parse_token_usage(result.output)
-    cost = estimate_cost(tokens_in, tokens_out)
-    budget.record_usage(UsageRecord(
-        segment=segment,
-        loop=f"repair-{attempt}",
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        estimated_cost_usd=cost,
-        duration_seconds=result.duration,
-    ))
 
 
 def _record_repair_learning(

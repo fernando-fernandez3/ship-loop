@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import logging
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..budget import BudgetTracker, UsageRecord, estimate_cost, parse_token_usage
+from ..agent import AgentResult, record_agent_usage, run_agent
+from ..budget import BudgetTracker
 from ..config import DeployConfig, SegmentConfig, ShipLoopConfig
 from ..deploy import verify_deployment
 from ..git_ops import (
@@ -47,7 +46,6 @@ async def run_ship_loop(
     report = SegmentReport(name=segment.name, status="running")
     loop_start = time.monotonic()
 
-    # Phase 1: Load learnings and build augmented prompt
     relevant_learnings = learnings.search(segment.prompt)
     learnings_prefix = learnings.format_for_prompt(relevant_learnings)
 
@@ -58,7 +56,6 @@ async def run_ship_loop(
     else:
         reporter._print("   📚 No prior learnings")
 
-    # Phase 2: Run coding agent
     reporter.segment_phase(segment.name, "coding")
 
     if not budget.check_budget(segment.name):
@@ -68,8 +65,11 @@ async def run_ship_loop(
         report.duration_seconds = time.monotonic() - loop_start
         return ShipResult(success=False, report=report)
 
-    agent_result = await _run_agent(config.agent_command, augmented_prompt, repo)
-    _record_agent_usage(budget, segment.name, "ship", agent_result)
+    agent_result = await run_agent(
+        config.agent_command, augmented_prompt, repo,
+        timeout=config.timeouts.agent,
+    )
+    record_agent_usage(budget, segment.name, "ship", agent_result)
 
     if not agent_result.success:
         report.status = "failed"
@@ -79,18 +79,17 @@ async def run_ship_loop(
 
     reporter._print(f"   ✅ Agent completed in {agent_result.duration:.0f}s")
 
-    # Phase 3: Run preflight
     reporter.segment_phase(segment.name, "preflight")
-    preflight_result = await run_preflight(config.preflight, repo)
+    preflight_result = await run_preflight(
+        config.preflight, repo, timeout=config.timeouts.preflight,
+    )
 
     if not preflight_result.passed:
-        # Return the preflight result so the orchestrator can trigger repair
         report.duration_seconds = time.monotonic() - loop_start
         return ShipResult(success=False, report=report)
 
     reporter._print("   ✅ Preflight passed")
 
-    # Phase 4: Ship (stage, scan, commit, push, tag)
     ship_result = await _ship_changes(config, segment, repo, reporter)
     if not ship_result.success:
         report.status = "failed"
@@ -98,7 +97,6 @@ async def run_ship_loop(
         report.duration_seconds = time.monotonic() - loop_start
         return ShipResult(success=False, report=report)
 
-    # Phase 5: Verify deployment
     reporter.segment_phase(segment.name, "verifying")
     verify_result = await verify_deployment(config.deploy, ship_result.commit_sha, config.site)
 
@@ -129,45 +127,6 @@ async def run_ship_loop(
         deploy_url=verify_result.deploy_url or "",
         report=report,
     )
-
-
-@dataclass
-class _AgentResult:
-    success: bool
-    output: str = ""
-    error: str = ""
-    duration: float = 0.0
-
-
-async def _run_agent(agent_command: str, prompt: str, cwd: Path) -> _AgentResult:
-    with tempfile.NamedTemporaryFile(
-        mode="w", prefix="shiploop-prompt-", suffix=".txt", delete=False,
-    ) as f:
-        f.write(prompt)
-        prompt_file = Path(f.name)
-
-    try:
-        start = time.monotonic()
-        proc = await asyncio.create_subprocess_shell(
-            f"cat {prompt_file} | {agent_command}",
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        stdout, _ = await proc.communicate()
-        duration = time.monotonic() - start
-        output = stdout.decode(errors="replace")
-
-        if proc.returncode != 0:
-            return _AgentResult(
-                success=False,
-                output=output,
-                error=f"Agent exited with code {proc.returncode}",
-                duration=duration,
-            )
-        return _AgentResult(success=True, output=output, duration=duration)
-    finally:
-        prompt_file.unlink(missing_ok=True)
 
 
 @dataclass
@@ -212,21 +171,3 @@ async def _ship_changes(
     reporter._print(f"   🏷  Tagged: {tag}")
 
     return _ShipChangesResult(success=True, commit_sha=sha, tag=tag)
-
-
-def _record_agent_usage(
-    budget: BudgetTracker,
-    segment: str,
-    loop: str,
-    agent_result: _AgentResult,
-) -> None:
-    tokens_in, tokens_out = parse_token_usage(agent_result.output)
-    cost = estimate_cost(tokens_in, tokens_out)
-    budget.record_usage(UsageRecord(
-        segment=segment,
-        loop=loop,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        estimated_cost_usd=cost,
-        duration_seconds=agent_result.duration,
-    ))
