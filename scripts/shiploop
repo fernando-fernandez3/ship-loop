@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+"""Ship Loop v3.1 — Self-healing build pipeline
+
+Usage:
+    shiploop run              Start or resume the pipeline
+    shiploop status           Show current state of all segments
+    shiploop reset <segment>  Reset a segment to pending
+    shiploop learnings list   Show all learnings
+    shiploop learnings search <query>  Search learnings
+    shiploop budget           Show cost summary
+"""
+import sys
+from pathlib import Path
+
+# Add the skill root to sys.path so src/ and providers/ are importable
+skill_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(skill_root))
+
+from src.cli import main
+
+sys.exit(main())

@@ -8,9 +8,10 @@ description: >
 metadata:
   openclaw:
     emoji: "🚢"
-    version: "3.0.0"
+    version: "3.1.0"
     requires:
-      bins: ["git", "bash", "curl"]
+      bins: ["git", "python3"]
+      python: ["pyyaml>=6.0", "pydantic>=2.0"]
     trigger_phrases:
       - "ship loop"
       - "keep building"
@@ -22,7 +23,7 @@ metadata:
 
 # Ship Loop
 
-Orchestrate multi-segment feature work as a self-healing pipeline. Three nested loops ensure maximum autonomy: **Loop 1** runs the standard code→preflight→ship→verify chain, **Loop 2** auto-repairs failures via the coding agent, and **Loop 3** spawns experiment branches when repairs stall. A persistent **learnings engine** feeds lessons from past failures into future runs.
+Orchestrate multi-segment feature work as a self-healing pipeline. Three nested loops ensure maximum autonomy: **Loop 1** runs the standard code→preflight→ship→verify chain, **Loop 2** auto-repairs failures via the coding agent, and **Loop 3** spawns experiment branches when repairs stall. A persistent **learnings engine** feeds lessons from past failures into future runs. A **budget tracker** monitors token usage and estimated costs.
 
 ## Architecture: Three Nested Loops
 
@@ -47,6 +48,7 @@ Orchestrate multi-segment feature work as a self-healing pipeline. Three nested 
 │                                                  │
 │  📚 Learnings Engine: every failure → lesson     │
 │     every run loads relevant lessons into prompt │
+│  💰 Budget Tracker: token/cost tracking per run  │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -56,12 +58,38 @@ Orchestrate multi-segment feature work as a self-healing pipeline. Three nested 
 - Any work that follows: code → preflight → commit → deploy → verify → next
 - When you need checkpointing so progress survives session restarts
 - When you want self-healing: failures auto-repair before asking humans
+- When you want cost visibility across agent invocations
 
 ## Prerequisites
 
+- Python 3.10+ with `pyyaml` and `pydantic` installed
 - A git repository with a remote
 - A deployment pipeline triggered by push (Vercel, Netlify, etc.)
 - A coding agent CLI configured via `agent_command` in SHIPLOOP.yml
+
+## Installation
+
+```bash
+pip install pyyaml pydantic
+```
+
+The CLI lives at `scripts/shiploop` — run directly or add to PATH.
+
+## CLI Usage
+
+```bash
+shiploop run              # Start or resume the pipeline
+shiploop status           # Show current state of all segments
+shiploop reset <segment>  # Reset a segment to pending
+shiploop learnings list   # Show all learnings
+shiploop learnings search <query>  # Search learnings
+shiploop budget           # Show cost summary
+
+# Options
+shiploop -c /path/to/SHIPLOOP.yml run   # Custom config path
+shiploop -v run                          # Verbose logging
+shiploop --version                       # Show version
+```
 
 ## Pipeline Definition (SHIPLOOP.yml)
 
@@ -71,169 +99,168 @@ Orchestrate multi-segment feature work as a self-healing pipeline. Three nested 
 project: "Project Name"
 repo: /absolute/path/to/project
 site: https://production-url.com
-platform: vercel         # vercel | netlify | static | custom
-branch: direct-to-main  # direct-to-main | per-segment
+branch: pr               # direct-to-main | per-segment | pr
+mode: solo               # solo | team
 
 agent_command: "claude --print --permission-mode bypassPermissions"
-
-verify:
-  routes: [/, /api/health]
-  marker: "data-version"
-  health_endpoint: /api/health
-  deploy_header: x-vercel-deployment-url
-
-timeouts:
-  agent: 900
-  deploy: 300
-  verify: 180
 
 preflight:
   build: "npm run build"
   lint: "npm run lint"
   test: "npm run test"
 
-# Loop 2: Repair config
-repair:
-  max_attempts: 3        # Max repair attempts before escalating to meta loop
+deploy:
+  provider: vercel        # vercel | netlify | custom
+  routes: [/, /api/health]
+  marker: "data-version"
+  health_endpoint: /api/health
+  deploy_header: x-vercel-deployment-url
+  timeout: 300
+  script: null            # for custom provider only
 
-# Loop 3: Meta loop config
+repair:
+  max_attempts: 3
+
 meta:
-  enabled: true          # Set false to skip meta loop (fail immediately after repair)
-  experiments: 3         # Number of experiment branches to try
+  enabled: true
+  experiments: 3
+
+budget:
+  max_usd_per_segment: 10.0
+  max_usd_per_run: 50.0
+  max_tokens_per_segment: 500000
+  halt_on_breach: true
 
 blocked_patterns:
   - "*.pem"
 
-rollback:
-  last_good_commit: null
-  last_good_tag: null
-
 segments:
   - name: "feature-name"
-    status: pending      # pending | running | shipped | failed
+    status: pending       # pending | coding | preflight | shipping | verifying
+                          # | repairing | experimenting | shipped | failed
     prompt: |
       Your coding agent prompt here.
     depends_on: []
     commit: null
     deploy_url: null
     tag: null
+    touched_paths: []     # v3.1: for parallel execution detection
 ```
 
 ### Built-in Blocked Patterns
 
-Always rejected regardless of config: `.env`, `*.key`, `*.pem`, `*.p12`, `*.secret`, `id_rsa`, `id_ed25519`, `credentials.json`, `service-account*.json`, `token.json`, `node_modules/`, `__pycache__/`
+Always rejected regardless of config: `.env`, `.env.*`, `*.key`, `*.pem`, `*.p12`, `*.pfx`, `*.secret`, `id_rsa`, `id_ed25519`, `*.keystore`, `credentials.json`, `service-account*.json`, `token.json`, `.npmrc`, `node_modules/`, `__pycache__/`, `.pytest_cache/`, `*.sqlite`, `*.sqlite3`, `.DS_Store`, `learnings.yml`
 
-## Scripts
+## State Machine
 
-This skill includes 7 scripts in `scripts/`. Copy to your project:
-
-```bash
-cp scripts/*.sh <repo>/scripts/ && chmod +x <repo>/scripts/*.sh
+```
+States per segment:
+  pending → coding → preflight → shipping → verifying → shipped
+                  ↘ repairing (Loop 2) → preflight
+                  ↘ experimenting (Loop 3) → preflight → shipping
+                  ↘ failed
 ```
 
-| Script | Purpose |
-|--------|---------|
-| `run-segment.sh` | Main orchestrator: runs all 3 loops for a segment |
-| `preflight.sh` | Build + lint + test gate |
-| `ship.sh` | Stage, security scan, commit, push, tag, verify |
-| `verify-deploy.sh` | Poll production for successful deployment |
-| `repair.sh` | Loop 2: construct repair prompt, run agent |
-| `meta-experiment.sh` | Loop 3: run a single experiment branch |
-| `learnings.sh` | Record and load persistent learnings |
+State is checkpointed to `SHIPLOOP.yml` after every transition. Any crash can be recovered by re-reading the file.
 
 ## Execution Flow
 
 ### 1. Read SHIPLOOP.yml
 
-Find first segment with `status: pending` whose `depends_on` are all `shipped`.
+Find first segment with `status: pending` whose `depends_on` are all `shipped` (DAG evaluation).
 
-### 2. Run the Segment
+### 2. Run the Segment (Loop 1)
 
-```bash
-PROMPT_FILE=$(mktemp /tmp/shiploop-prompt-XXXXXX.txt)
-cat > "$PROMPT_FILE" << 'PROMPT_EOF'
-<segment prompt>
-PROMPT_EOF
+1. Load relevant learnings, prepend to prompt
+2. Write prompt to temp file (never shell arguments)
+3. Run `agent_command` with prompt via stdin: `cat prompt.txt | {agent_command}`
+4. Run preflight (build, lint, test in sequence)
+5. If preflight passes → git operations (explicit staging, commit, push, tag)
+6. Verify deployment via configured provider
+7. Mark shipped
 
-cd <repo> && bash scripts/run-segment.sh "<segment-name>" "$PROMPT_FILE"
-```
+### 3. Repair Loop (Loop 2)
 
-Run as background exec, poll with `process(action="poll", sessionId="...", timeout=30000)`.
+Triggered when preflight fails:
 
-### 3. What Happens Inside run-segment.sh
-
-**Learnings injection**: If `learnings.yml` exists, relevant past lessons are prepended to the prompt.
-
-**Loop 1** (standard):
-1. Run coding agent with prompt via stdin
-2. Run preflight (build + lint + test)
-3. If preflight passes → ship (commit, push, verify)
-
-**Loop 2** (on preflight failure):
-1. Capture error output + git diff + segment state
-2. Call `repair.sh` with failure context
-3. Agent receives a REPAIR prompt describing what failed
+1. Capture error output, failed step, segment state
+2. Build REPAIR prompt with full failure context
+3. Run agent with repair prompt
 4. Re-run preflight
-5. Repeat up to `repair.max_attempts` (default 3)
-6. Track error signatures for convergence detection
+5. If passes → back to ship flow
+6. Error signature convergence: if two consecutive attempts produce the same error hash, stop early
+7. If max attempts reached → escalate to Loop 3
 
-**Loop 3** (when repair exhausts):
-1. Collect ALL failure context (every attempt, every error, every diff)
-2. Run agent with META-ANALYSIS prompt: "Why do all approaches fail?"
-3. Agent generates N experiment prompts, each with a different approach
-4. For each experiment:
-   - Create branch: `experiment/<segment-name>-<N>`
+### 4. Meta Loop (Loop 3)
+
+Triggered when repair exhausts all attempts:
+
+1. Discard uncommitted changes
+2. Collect ALL failure context
+3. Run agent with META-ANALYSIS prompt
+4. Parse experiment descriptions from `---APPROACH N---` markers
+5. For each experiment:
+   - Create git worktree
    - Run agent with experiment prompt
    - Run preflight
-   - If passes → record as candidate
-5. Pick winner: first passing experiment (simplest diff as tiebreaker)
-6. Merge winner to main branch, continue ship flow
-7. If NO winner → segment `failed`, surface all results to user
-
-**After any fix**: Record lesson to `learnings.yml`.
-
-### 4. Check Results & Continue
-
-- **Exit 0**: Update SHIPLOOP.yml (`status: shipped`, record commit/tag/url), start next segment
-- **Non-zero**: Set `status: failed`, report to user with rollback info
+   - Record pass/fail + diff size
+6. Pick winner: first passing, simplest diff as tiebreaker
+7. Merge winner, clean up experiment branches
+8. Continue with ship flow
+9. If NO experiments pass → mark segment `failed`
 
 ### 5. Chain Continuation
 
-After a segment ships, immediately find and start the next eligible segment. Don't wait for user.
+After a segment ships, immediately find and start the next eligible segment.
 
 ## Learnings Engine
 
-Every failure-then-fix cycle writes a lesson to `learnings.yml` in the project root:
+Every failure-then-fix cycle writes a lesson to `learnings.yml`:
 
 ```yaml
 - id: L001
   date: "2026-03-23"
   segment: "dark-mode"
+  error_signature: "abc123def456"
   failure: "Build failed: Cannot find module './ThemeToggle'"
   root_cause: "Fixed by repair loop attempt 2"
-  fix: "Repair agent auto-fixed the issue"
-  applies_to: [prompt, code]
-
-- id: L002
-  date: "2026-03-23"
-  segment: "auth-flow"
-  failure: "Repair loop exhausted after 3 attempts"
-  root_cause: "Required meta-analysis and experiment branching"
-  fix: "Experiment 2 succeeded with alternative approach"
-  applies_to: [prompt, code]
+  fix: "Repair agent auto-fixed on attempt 2"
+  tags: ["build", "import", "module", "component"]
 ```
 
-On every run, relevant learnings (matched by prompt keywords) are prepended to the agent's prompt. Over time, the pipeline encounters fewer novel failures.
+On every run, relevant learnings (matched by keyword scoring against the prompt) are prepended to the agent's prompt.
 
-### Manual Commands
+### CLI Access
 
 ```bash
-# Record a learning manually
-bash scripts/learnings.sh record "segment" "what failed" "why" "how to avoid"
-
-# Load relevant learnings for context
-bash scripts/learnings.sh load "dark mode theme toggle"
+shiploop learnings list
+shiploop learnings search "dark mode theme toggle"
 ```
+
+## Budget Tracking
+
+Token usage and estimated costs are tracked per agent invocation in `.shiploop/metrics.json`.
+
+```bash
+shiploop budget
+```
+
+Configuration:
+- `max_usd_per_segment` — halt if a single segment exceeds this
+- `max_usd_per_run` — halt if the entire run exceeds this
+- `halt_on_breach` — set `false` to warn but continue
+
+Cost is estimated from token counts parsed from agent output.
+
+## Deploy Verification
+
+### Providers
+
+| Provider | How it works |
+|----------|-------------|
+| `vercel` | Polls routes for HTTP 200, checks `x-vercel-deployment-url` header |
+| `netlify` | Polls routes for HTTP 200, checks `x-nf-request-id` header |
+| `custom` | Runs `deploy.script` with `SHIPLOOP_COMMIT` and `SHIPLOOP_SITE` env vars |
 
 ## Rollback
 
@@ -247,24 +274,12 @@ git checkout <last_good_tag> && git push origin HEAD:main --force
 git revert <bad_commit> && git push
 ```
 
-## Branch Strategy
-
-- **`direct-to-main`** (default): All commits go straight to main. Fast, rollback via tags.
-- **`per-segment`**: Each segment gets branch `shiploop/<segment-name>`, merged after verify.
-
 ## Crash Recovery
 
-On session start, check SHIPLOOP.yml for `status: running` segments:
-1. Check if process is still alive via `process(action="list")`
-2. If running: resume polling
-3. If not found: mark `failed`, report to user (do NOT auto-retry)
-
-## Platform Verification
-
-- **Vercel**: Check `x-vercel-deployment-url` header for new deployment
-- **Netlify**: Check `x-nf-request-id`, poll deploy API for `ready` status
-- **Static/GitHub Pages**: HTTP 200 + marker check
-- **Custom**: Override `verify-deploy.sh`
+On startup, the orchestrator checks for segments in active states (`coding`, `repairing`, `experimenting`, etc.):
+- Active segments are marked `failed`
+- A warning is displayed
+- The pipeline continues with the next eligible segment
 
 ## Critical Rules
 
@@ -274,6 +289,49 @@ On session start, check SHIPLOOP.yml for `status: running` segments:
 4. **Prompts via file** — never shell arguments (prevents injection)
 5. **Checkpoint everything** — write to SHIPLOOP.yml after every state change
 6. **Agent command from config** — always read from `agent_command`, never hardcode
+7. **Budget-aware** — track costs, enforce limits, fail gracefully
+
+## Project Structure
+
+```
+skills/ship-loop/
+├── SKILL.md              # This file
+├── scripts/
+│   ├── shiploop          # Python CLI entry point (executable)
+│   ├── run-segment.sh    # Legacy bash orchestrator
+│   ├── preflight.sh      # Legacy bash preflight
+│   ├── ship.sh           # Legacy bash ship
+│   ├── verify-deploy.sh  # Legacy bash verify
+│   ├── repair.sh         # Legacy bash repair
+│   ├── meta-experiment.sh # Legacy bash meta
+│   └── learnings.sh      # Legacy bash learnings
+├── src/
+│   ├── __init__.py
+│   ├── cli.py            # CLI interface (argparse)
+│   ├── config.py         # SHIPLOOP.yml parsing + validation (Pydantic v2)
+│   ├── orchestrator.py   # Main state machine + segment runner
+│   ├── loops/
+│   │   ├── ship.py       # Loop 1: code → preflight → ship → verify
+│   │   ├── repair.py     # Loop 2: capture error → agent fix → retry
+│   │   └── meta.py       # Loop 3: meta-analysis → experiments → pick winner
+│   ├── preflight.py      # Build + lint + test runner
+│   ├── git_ops.py        # All git operations (explicit staging, tags, worktrees)
+│   ├── deploy.py         # Deploy verification (plugin system)
+│   ├── budget.py         # Cost/token tracking + budget enforcement
+│   ├── learnings.py      # Learnings engine (record + load + keyword search)
+│   └── reporting.py      # Status messages + post-run reports
+├── providers/
+│   ├── base.py           # Abstract DeployVerifier
+│   ├── vercel.py         # Vercel verification
+│   ├── netlify.py        # Netlify verification
+│   └── custom.py         # Custom script provider
+├── requirements.txt
+└── tests/
+    ├── test_config.py
+    ├── test_orchestrator.py
+    ├── test_git_ops.py
+    └── test_budget.py
+```
 
 ## Worked Example
 
@@ -283,7 +341,6 @@ On session start, check SHIPLOOP.yml for `status: running` segments:
 project: "Portfolio"
 repo: /home/user/portfolio
 site: https://portfolio.vercel.app
-platform: vercel
 agent_command: "claude --print --permission-mode bypassPermissions"
 
 repair:
@@ -297,9 +354,14 @@ preflight:
   lint: "npx eslint . --max-warnings 0"
   test: "npm test -- --passWithNoTests"
 
-verify:
+deploy:
+  provider: vercel
   routes: [/, /projects]
   deploy_header: x-vercel-deployment-url
+
+budget:
+  max_usd_per_segment: 10.0
+  max_usd_per_run: 50.0
 
 segments:
   - name: "dark-mode"
@@ -317,91 +379,63 @@ segments:
 ### Execution: Happy Path + Repair + Meta
 
 ```
-🚢 Ship loop started: Portfolio (2 segments)
+🚢 Ship Loop: Portfolio (2 segments)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 🔄 Segment 1/2: dark-mode
    📚 No prior learnings
-   🤖 Agent completed in 4m 22s
+   🤖 coding... (0s)
+   ✅ Agent completed in 262s
+   🛫 preflight... (4m 22s)
    ✅ Preflight passed
    📦 Committed: a1b2c3d
-   🏷 Tagged: shiploop/dark-mode/20260323-001500
+   🏷  Tagged: shiploop/dark-mode/20260323-001500
    ✅ Deploy verified
-✅ Segment 1/2: dark-mode — shipped
+✅ Segment 1/2: dark-mode — shipped (a1b2c3d) [7m 30s, $0.42]
 
 🔄 Segment 2/2: contact-form
-   📚 Loaded 1 relevant learning
-   🤖 Agent completed in 5m 10s
-   ❌ Preflight FAILED — lint errors
-
+   📚 Loaded 1 relevant learning(s)
+   🤖 coding... (0s)
+   ✅ Agent completed in 310s
+   ❌ Preflight FAILED — entering repair loop
    🔧 Repair attempt 1/3
-      Agent fixed unused imports
-      ❌ Preflight still failing — test errors
-
+   ❌ Repair 1 failed: lint errors
    🔧 Repair attempt 2/3
-      Agent fixed test mocking
-      ❌ Preflight still failing — build error
-
+   ❌ Repair 2 failed: test errors
    🔧 Repair attempt 3/3
-      Agent restructured component
-      ❌ Preflight still failing
-
+   ❌ Repair 3 failed: build error
    ❌ Repair loop exhausted (3 attempts)
-
    🧪 Entering meta loop...
-      🧠 Meta-analysis: "Form component uses server action syntax
-         incompatible with current Next.js config"
-      🧪 Experiment 1/3: API route approach → ❌ failed
-      🧪 Experiment 2/3: Client-side fetch → ✅ passed (12 lines diff)
-      🧪 Experiment 3/3: Server action with config fix → ✅ passed (18 lines diff)
-      🏆 Winner: experiment 2 (simplest diff)
-      Merged to main
-
+   🧠 Running meta-analysis...
+   ✅ Meta-analysis complete
+   🧪 Experiment 1/3
+   ❌ Experiment 1 failed
+   🧪 Experiment 2/3
+   ✅ Experiment 2 passed (diff: 12 lines)
+   🧪 Experiment 3/3
+   ✅ Experiment 3 passed (diff: 18 lines)
+   🏆 Winner: experiment 2 (branch: experiment/contact-form-2)
+   ✅ Winner merged, experiment branches cleaned
    📦 Committed: e5f6g7h
-   🏷 Tagged: shiploop/contact-form/20260323-003200
+   🏷  Tagged: shiploop/contact-form/20260323-003200
    ✅ Deploy verified
-   📝 Learning L002 recorded
-✅ Segment 2/2: contact-form — shipped
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🏁 Ship loop complete! 2/2 segments shipped.
+   Total time: 25m 10s
+   Total cost: $3.84
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-### Pipeline Improvement Over Time
+## v3.1 Changes from v3.0
 
-```
-Night 1:  5 segments, 3 first-try, 1 repair-fixed, 1 meta-fixed  (6 hrs)
-Night 10: 5 segments, 4 first-try, 1 repair-fixed                (2 hrs)
-Night 50: 5 segments, 5 first-try                                 (1.5 hrs)
-```
-
-The learnings engine front-loads past lessons into prompts, so the agent avoids known failure patterns.
-
-## Status Messages
-
-After each segment:
-```
-✅ Segment 3/7: Dark mode — shipped (a1b2c3d)
-🔄 Starting Segment 4/7: Trip management...
-```
-
-On failure (all loops exhausted):
-```
-❌ Segment 4/7: Trip management — FAILED
-   Repair: 3/3 attempts failed
-   Meta: 3/3 experiments failed
-   Last good: shiploop/dark-mode/20260323-001500 (a1b2c3d)
-   Failure history: /tmp/shiploop-failure-history-*.txt
-```
-
-## Starting a Ship Loop
-
-1. Create `SHIPLOOP.yml` with all segments defined
-2. Copy scripts from this skill's `scripts/` directory
-3. Confirm plan with user
-4. Start with first eligible segment
-
-## Resuming a Ship Loop
-
-1. Read `SHIPLOOP.yml`
-2. Report status of all segments
-3. Run crash recovery for any `running` segments
-4. Continue with next `pending` segment
+- **Python CLI** replaces bash scripts as the primary interface
+- **Pydantic v2** config validation with typed models
+- **Budget tracking** — token/cost monitoring with per-segment and per-run limits
+- **Enhanced state machine** — explicit states (coding, preflight, shipping, verifying, repairing, experimenting) with checkpoint after every transition
+- **DAG-aware scheduling** — parallel segment detection via `touched_paths`
+- **Error convergence detection** — hash-based comparison of consecutive repair errors
+- **Learnings keyword scoring** — weighted tag/keyword matching for relevant lesson retrieval
+- **Deploy provider plugins** — Vercel, Netlify, Custom script with abstract base
+- **Crash recovery** — automatic detection and marking of active-state segments on startup
+- **Legacy bash scripts preserved** in `scripts/` for reference
