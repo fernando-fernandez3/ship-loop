@@ -14,7 +14,9 @@ from .config import (
     save_config,
 )
 from .learnings import LearningsEngine
+from .git_ops import get_diff, get_diff_stat
 from .loops.meta import run_meta_loop
+from .loops.optimize import run_optimization_loop
 from .loops.repair import run_repair_loop
 from .loops.ship import ShipResult, run_ship_loop
 from .preflight import run_preflight
@@ -36,6 +38,7 @@ class Orchestrator:
         self.learnings = LearningsEngine(learnings_path)
 
         self.reporter = Reporter(self.config)
+        self._optimization_tasks: list[asyncio.Task] = []
 
     def _checkpoint(self) -> None:
         save_config(self.config, self.config_path)
@@ -87,6 +90,9 @@ class Orchestrator:
                 if not success:
                     all_success = False
 
+        if self._optimization_tasks:
+            await asyncio.gather(*self._optimization_tasks, return_exceptions=True)
+
         self.reporter.pipeline_complete()
         return all_success
 
@@ -120,11 +126,22 @@ class Orchestrator:
         )
 
         if repair_result.success:
-            # Preflight passed after repair — ship the changes
+            repair_diff = await get_diff(Path(self.config.repo))
+            repair_diff_stat = await get_diff_stat(Path(self.config.repo))
+            repair_diff_lines = len(repair_diff_stat.strip().splitlines()) if repair_diff_stat.strip() else 0
+
             self._set_segment_status(segment, SegmentStatus.SHIPPING)
             ship_result = await self._ship_and_verify(segment)
             if ship_result.success:
-                return self._mark_shipped(index, segment, ship_result)
+                result = self._mark_shipped(index, segment, ship_result)
+
+                task = asyncio.create_task(self._run_optimization(
+                    segment, preflight_result.combined_output,
+                    repair_diff, repair_result.attempts_used, repair_diff_lines,
+                ))
+                self._optimization_tasks.append(task)
+
+                return result
             return self._mark_failed(index, segment, ship_result)
 
         # Phase 3: Meta loop (repair exhausted)
@@ -232,6 +249,30 @@ class Orchestrator:
         report = result.report or SegmentReport(name=segment.name, status="failed")
         self.reporter.segment_failed(index, report)
         return False
+
+    async def _run_optimization(
+        self,
+        segment: SegmentConfig,
+        preflight_error: str,
+        repair_diff: str,
+        repair_attempts: int,
+        repair_diff_lines: int,
+    ) -> None:
+        try:
+            await run_optimization_loop(
+                self.config,
+                segment.name,
+                segment.prompt,
+                preflight_error,
+                repair_diff,
+                repair_attempts,
+                repair_diff_lines,
+                self.reporter,
+                self.budget,
+                self.learnings,
+            )
+        except Exception as e:
+            logger.error("Optimization for '%s' failed: %s", segment.name, e)
 
     def get_status(self) -> list[dict]:
         return [

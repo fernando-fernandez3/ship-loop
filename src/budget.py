@@ -81,6 +81,13 @@ class BudgetTracker:
     def get_run_cost(self) -> float:
         return sum(r.estimated_cost_usd for r in self.records)
 
+    def check_optimization_budget(self, segment: str) -> bool:
+        optimization_cost = sum(
+            r.estimated_cost_usd for r in self.records
+            if r.segment == segment and r.loop.startswith("optimize-")
+        )
+        return optimization_cost < self.config.optimization_budget_usd
+
     def get_segment_tokens(self, segment: str) -> int:
         return sum(r.tokens_in + r.tokens_out for r in self.records if r.segment == segment)
 

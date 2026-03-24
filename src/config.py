@@ -47,10 +47,19 @@ class BudgetConfig(BaseModel):
     max_usd_per_run: float = 50.0
     max_tokens_per_segment: int = 500_000
     halt_on_breach: bool = True
+    optimization_budget_usd: float = 5.0
 
 
 class RepairConfig(BaseModel):
     max_attempts: int = 3
+
+
+class OptimizationConfig(BaseModel):
+    enabled: bool = True
+    max_experiments: int = 2
+    min_repair_attempts: int = 1
+    min_repair_diff_lines: int = 5
+    budget_usd: float = 5.0
 
 
 class MetaConfig(BaseModel):
@@ -92,6 +101,7 @@ class ShipLoopConfig(BaseModel):
     deploy: DeployConfig = Field(default_factory=DeployConfig)
     repair: RepairConfig = RepairConfig()
     meta: MetaConfig = MetaConfig()
+    optimization: OptimizationConfig = OptimizationConfig()
     budget: BudgetConfig = BudgetConfig()
     timeouts: TimeoutsConfig = TimeoutsConfig()
     blocked_patterns: list[str] = []

@@ -94,6 +94,18 @@ class Reporter:
     def experiment_winner(self, exp_num: int, branch: str) -> None:
         self._print(f"   🏆 Winner: experiment {exp_num} (branch: {branch})")
 
+    def optimization_start(self, segment_name: str) -> None:
+        self._print(f"   🔬 Background optimization for '{segment_name}'...")
+
+    def optimization_result(self, segment_name: str, result: dict) -> None:
+        if result.get("winner") is not None:
+            self._print(f"   🎯 Optimization found: {result.get('improvement_type', '')} for '{segment_name}'")
+        else:
+            self._print(f"   ℹ️  No optimization found for '{segment_name}'")
+
+    def optimization_skipped(self, segment_name: str, reason: str) -> None:
+        self._print(f"   ⏭️  Optimization skipped for '{segment_name}': {reason}")
+
     def budget_warning(self, segment: str, cost: float, limit: float) -> None:
         self._print(f"⚠️  Budget alert: {segment} at ${cost:.2f} / ${limit:.2f}")
 

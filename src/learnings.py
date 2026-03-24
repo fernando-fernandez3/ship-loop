@@ -27,6 +27,9 @@ class Learning(BaseModel):
     root_cause: str
     fix: str
     tags: list[str] = []
+    learning_type: str = "failure"
+    improvement_type: str = ""
+    prompt_delta: str = ""
 
 
 class LearningsEngine:
@@ -101,15 +104,30 @@ class LearningsEngine:
     def format_for_prompt(self, learnings: list[Learning]) -> str:
         if not learnings:
             return ""
+
+        failure_learnings = [l for l in learnings if l.learning_type != "optimization"]
+        optimization_learnings = [l for l in learnings if l.learning_type == "optimization"]
+
         lines = ["## Relevant Lessons from Past Runs", ""]
-        for learning in learnings:
-            lines.append(f"### {learning.id}: {learning.segment}")
-            lines.append(f"- **Failure:** {learning.failure}")
-            lines.append(f"- **Root cause:** {learning.root_cause}")
-            lines.append(f"- **Fix:** {learning.fix}")
+
+        if failure_learnings:
+            for learning in failure_learnings:
+                lines.append(f"### {learning.id}: {learning.segment}")
+                lines.append(f"- **Failure:** {learning.failure}")
+                lines.append(f"- **Root cause:** {learning.root_cause}")
+                lines.append(f"- **Fix:** {learning.fix}")
+                lines.append("")
+            lines.append("Use these lessons to avoid repeating the same mistakes.")
             lines.append("")
-        lines.append("Use these lessons to avoid repeating the same mistakes.")
-        lines.append("")
+
+        if optimization_learnings:
+            lines.append("## Optimized Instructions from Past Runs")
+            lines.append("")
+            for learning in optimization_learnings:
+                lines.append(f"### {learning.id}: {learning.segment} ({learning.improvement_type})")
+                lines.append(f"- **For best results:** {learning.prompt_delta}")
+                lines.append("")
+
         return "\n".join(lines)
 
 

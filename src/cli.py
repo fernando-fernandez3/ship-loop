@@ -94,8 +94,16 @@ def _cmd_run(config_path: Path) -> int:
 
 
 def _cmd_status(config_path: Path) -> int:
+    from .learnings import LearningsEngine
+
     orchestrator = Orchestrator(config_path)
     statuses = orchestrator.get_status()
+
+    learnings_path = Path(orchestrator.config.repo) / "learnings.yml"
+    learnings_engine = LearningsEngine(learnings_path)
+    optimization_segments = {
+        l.segment for l in learnings_engine.learnings if l.learning_type == "optimization"
+    }
 
     print(f"\n🚢 Ship Loop: {orchestrator.config.project}")
     print("━" * 50)
@@ -110,7 +118,8 @@ def _cmd_status(config_path: Path) -> int:
         icon = status_icons.get(seg["status"], "▶")
         deps = f" (depends: {', '.join(seg['depends_on'])})" if seg["depends_on"] else ""
         commit_info = f" [{seg['commit'][:7]}]" if seg.get("commit") else ""
-        print(f"  {i}. {icon} {seg['name']}: {seg['status']}{commit_info}{deps}")
+        opt_info = " 🎯 optimized" if seg["name"] in optimization_segments else ""
+        print(f"  {i}. {icon} {seg['name']}: {seg['status']}{commit_info}{deps}{opt_info}")
 
     total = len(statuses)
     shipped = sum(1 for s in statuses if s["status"] == "shipped")
@@ -118,6 +127,8 @@ def _cmd_status(config_path: Path) -> int:
     pending = sum(1 for s in statuses if s["status"] == "pending")
 
     print(f"\n  {shipped}/{total} shipped, {failed} failed, {pending} pending")
+    if optimization_segments:
+        print(f"  🔬 Optimizations: {len(optimization_segments)} segment(s)")
     print("━" * 50)
     return 0
 
