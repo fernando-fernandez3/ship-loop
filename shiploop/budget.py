@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,7 +52,10 @@ class BudgetTracker:
     def _save(self) -> None:
         self.metrics_file.parent.mkdir(parents=True, exist_ok=True)
         data = {"records": [r.model_dump() for r in self.records]}
-        self.metrics_file.write_text(json.dumps(data, indent=2))
+        content = json.dumps(data, indent=2)
+        tmp_path = self.metrics_file.with_suffix(".json.tmp")
+        tmp_path.write_text(content)
+        os.replace(str(tmp_path), str(self.metrics_file))
 
     def check_budget(self, segment: str) -> bool:
         if not self.config.halt_on_breach:
@@ -122,7 +126,13 @@ def estimate_from_prompt(prompt_length: int, duration_seconds: float, model: str
     return estimated_input, estimated_output
 
 
-def estimate_cost(tokens_in: int, tokens_out: int, model: str = "default") -> float:
-    pricing = MODEL_PRICING_PER_MILLION.get(model, MODEL_PRICING_PER_MILLION["default"])
+def estimate_cost(
+    tokens_in: int, tokens_out: int, model: str = "default",
+    custom_pricing: dict[str, dict[str, float]] | None = None,
+) -> float:
+    all_pricing = {**MODEL_PRICING_PER_MILLION}
+    if custom_pricing:
+        all_pricing.update(custom_pricing)
+    pricing = all_pricing.get(model, all_pricing["default"])
     cost = (tokens_in * pricing["input"] + tokens_out * pricing["output"]) / 1_000_000
     return round(cost, 4)

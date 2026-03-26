@@ -42,7 +42,15 @@ def main(argv: list[str] | None = None) -> int:
     subparsers.add_parser("init", help="Initialize SHIPLOOP.yml in the current directory")
 
     # run
-    subparsers.add_parser("run", help="Start or resume the pipeline")
+    run_parser = subparsers.add_parser("run", help="Start or resume the pipeline")
+    run_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Walk the DAG and print what would happen without executing anything",
+    )
+    run_parser.add_argument(
+        "--notify-command",
+        help="Shell command to run on completion with SHIPLOOP_STATUS, SHIPLOOP_SEGMENTS_SHIPPED, SHIPLOOP_TOTAL_SEGMENTS, SHIPLOOP_DURATION env vars",
+    )
 
     # status
     subparsers.add_parser("status", help="Show current state of all segments")
@@ -75,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "init":
             return _cmd_init()
         elif args.command == "run":
-            return _cmd_run(config_path)
+            return _cmd_run(config_path, dry_run=args.dry_run, notify_command=getattr(args, "notify_command", None))
         elif args.command == "status":
             return _cmd_status(config_path)
         elif args.command == "reset":
@@ -199,9 +207,31 @@ def _detect_git_remote(cwd: Path) -> str | None:
     return None
 
 
-def _cmd_run(config_path: Path) -> int:
+def _cmd_run(config_path: Path, dry_run: bool = False, notify_command: str | None = None) -> int:
+    import os
+    import time
+
+    start_time = time.monotonic()
     orchestrator = Orchestrator(config_path)
-    success = asyncio.run(orchestrator.run())
+    success = asyncio.run(orchestrator.run(dry_run=dry_run))
+
+    if notify_command and not dry_run:
+        duration = time.monotonic() - start_time
+        statuses = orchestrator.get_status()
+        shipped = sum(1 for s in statuses if s["status"] == "shipped")
+        total = len(statuses)
+        env = {
+            **os.environ,
+            "SHIPLOOP_STATUS": "success" if success else "failure",
+            "SHIPLOOP_SEGMENTS_SHIPPED": str(shipped),
+            "SHIPLOOP_TOTAL_SEGMENTS": str(total),
+            "SHIPLOOP_DURATION": f"{duration:.0f}",
+        }
+        try:
+            subprocess.run(notify_command, shell=True, env=env, timeout=30)
+        except Exception as e:
+            logging.warning("Notification command failed: %s", e)
+
     return 0 if success else 1
 
 

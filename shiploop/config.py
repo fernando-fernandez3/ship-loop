@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,7 @@ class SegmentConfig(BaseModel):
     commit: str | None = None
     deploy_url: str | None = None
     tag: str | None = None
+    # TODO: touched_paths is reserved for future parallel execution (not yet implemented)
     touched_paths: list[str] = []
 
 
@@ -48,6 +50,7 @@ class BudgetConfig(BaseModel):
     max_tokens_per_segment: int = 500_000
     halt_on_breach: bool = True
     optimization_budget_usd: float = 5.0
+    model_pricing: dict[str, dict[str, float]] = {}
 
 
 class RepairConfig(BaseModel):
@@ -161,7 +164,10 @@ def load_config(config_path: Path) -> ShipLoopConfig:
 
 def save_config(config: ShipLoopConfig, config_path: Path) -> None:
     data = _config_to_serializable(config)
-    config_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True))
+    content = yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    tmp_path = config_path.with_suffix(".yml.tmp")
+    tmp_path.write_text(content)
+    os.replace(str(tmp_path), str(config_path))
 
 
 def _config_to_serializable(config: ShipLoopConfig) -> dict[str, Any]:

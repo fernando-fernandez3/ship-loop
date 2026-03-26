@@ -63,7 +63,7 @@ async def run_meta_loop(
 
     meta_agent = await run_agent(
         config.agent_command, meta_prompt, repo,
-        timeout=config.timeouts.agent,
+        timeout=config.timeouts.agent, segment=segment_name,
     )
     record_agent_usage(budget, segment_name, "meta-analysis", meta_agent)
 
@@ -101,7 +101,7 @@ async def run_meta_loop(
 
             agent_result = await run_agent(
                 config.agent_command, exp_prompt, worktree_path,
-                timeout=config.timeouts.agent,
+                timeout=config.timeouts.agent, segment=segment_name,
             )
             record_agent_usage(budget, segment_name, f"experiment-{exp_num}", agent_result)
 
@@ -132,11 +132,15 @@ async def run_meta_loop(
     if not candidates:
         reporter._print(f"\n   ❌ ALL {num_experiments} experiments failed — segment failed")
 
+        error_summary = "; ".join(
+            err[:100] for err in all_errors[:3]
+        ) if all_errors else "no error details captured"
+
         learnings.record(
             segment=segment_name,
-            failure="All repair and meta-experiment attempts failed",
-            root_cause="Task may need decomposition or human intervention",
-            fix="No automated fix found",
+            failure=f"All {num_experiments} repair and meta-experiment attempts failed. Errors: {error_summary}"[:500],
+            root_cause=f"Failure context: {failure_context[:300]}",
+            fix="No automated fix found — task may need decomposition or human intervention",
             tags=["meta-failure", "needs-human"],
         )
 

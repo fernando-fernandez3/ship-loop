@@ -21,14 +21,24 @@ ALWAYS_BLOCKED = [
 ]
 
 
-async def run_git(args: list[str], cwd: Path, check: bool = True) -> tuple[int, str, str]:
+DEFAULT_GIT_TIMEOUT = 60
+
+
+async def run_git(args: list[str], cwd: Path, check: bool = True, timeout: int = DEFAULT_GIT_TIMEOUT) -> tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
         "git", *args,
         cwd=cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        raise GitError(f"git {' '.join(args)} timed out after {timeout}s")
     out = stdout.decode().strip()
     err = stderr.decode().strip()
     if check and proc.returncode != 0:

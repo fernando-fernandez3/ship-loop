@@ -112,7 +112,7 @@ async def run_optimization_loop(
 
     analysis_result = await run_agent(
         config.agent_command, analysis_prompt, repo,
-        timeout=config.timeouts.agent,
+        timeout=config.timeouts.agent, segment=segment_name,
     )
     record_agent_usage(budget, segment_name, "optimize-analysis", analysis_result)
 
@@ -180,7 +180,7 @@ async def _run_experiment(
 
         agent_result = await run_agent(
             config.agent_command, variation.modified_prompt, worktree_path,
-            timeout=config.timeouts.agent,
+            timeout=config.timeouts.agent, segment=segment_name,
         )
         record_agent_usage(
             budget, segment_name,

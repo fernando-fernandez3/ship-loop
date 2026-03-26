@@ -59,7 +59,7 @@ async def run_repair_loop(
 
         agent_result = await run_agent(
             config.agent_command, repair_prompt, repo,
-            timeout=config.timeouts.agent,
+            timeout=config.timeouts.agent, segment=segment_name,
         )
         record_agent_usage(budget, segment_name, f"repair-{attempt}", agent_result)
 

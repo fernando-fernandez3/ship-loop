@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
+import glob
 import logging
+import os
+import shutil
+import signal
 import time
 from pathlib import Path
 
@@ -13,6 +18,7 @@ from .config import (
     load_config,
     save_config,
 )
+from .deploy import verify_deployment
 from .learnings import LearningsEngine
 from .git_ops import get_diff, get_diff_stat
 from .loops.meta import run_meta_loop
@@ -39,6 +45,8 @@ class Orchestrator:
 
         self.reporter = Reporter(self.config)
         self._optimization_tasks: list[asyncio.Task] = []
+        self._lock_file = None
+        self._active_processes: list[asyncio.subprocess.Process] = []
 
     def _checkpoint(self) -> None:
         save_config(self.config, self.config_path)
@@ -69,13 +77,102 @@ class Orchestrator:
                 recovered.append(seg.name)
         return recovered
 
-    async def run(self) -> bool:
+    async def _recover_verifying_segments(self) -> list[str]:
+        re_verified: list[str] = []
+        for seg in self.config.segments:
+            if seg.status == SegmentStatus.FAILED and seg.commit:
+                try:
+                    verify_result = await verify_deployment(
+                        self.config.deploy, seg.commit, self.config.site,
+                    )
+                    if verify_result.success:
+                        seg.deploy_url = verify_result.deploy_url or ""
+                        self._set_segment_status(seg, SegmentStatus.SHIPPED)
+                        re_verified.append(seg.name)
+                        logger.info("Re-verification succeeded for '%s'", seg.name)
+                except Exception as e:
+                    logger.warning("Re-verification failed for '%s': %s", seg.name, e)
+        return re_verified
+
+    def _acquire_lock(self) -> None:
+        lock_path = self.repo / ".shiploop.lock"
+        self._lock_file = open(lock_path, "w")
+        try:
+            fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self._lock_file.close()
+            self._lock_file = None
+            raise RuntimeError(
+                "Another shiploop run is already active (could not acquire .shiploop.lock)"
+            )
+
+    def _release_lock(self) -> None:
+        if self._lock_file:
+            try:
+                fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+                self._lock_file.close()
+            except OSError:
+                pass
+            self._lock_file = None
+
+    def _cleanup_orphaned_worktrees(self) -> None:
+        for path in glob.glob("/tmp/shiploop-exp-*"):
+            try:
+                shutil.rmtree(path)
+                logger.info("Cleaned orphaned worktree: %s", path)
+            except OSError as e:
+                logger.warning("Failed to remove orphaned worktree %s: %s", path, e)
+        for path in glob.glob("/tmp/shiploop-opt-*"):
+            try:
+                shutil.rmtree(path)
+                logger.info("Cleaned orphaned worktree: %s", path)
+            except OSError as e:
+                logger.warning("Failed to remove orphaned worktree %s: %s", path, e)
+
+    def _install_signal_handlers(self) -> None:
+        loop = asyncio.get_event_loop()
+
+        def _handle_signal(sig: int) -> None:
+            logger.warning("Received signal %s, shutting down...", signal.Signals(sig).name)
+            for proc in self._active_processes:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            self._release_lock()
+            raise SystemExit(1)
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, _handle_signal, sig)
+
+    def register_process(self, proc: asyncio.subprocess.Process) -> None:
+        self._active_processes.append(proc)
+
+    def unregister_process(self, proc: asyncio.subprocess.Process) -> None:
+        try:
+            self._active_processes.remove(proc)
+        except ValueError:
+            pass
+
+    async def run(self, dry_run: bool = False) -> bool:
+        self._acquire_lock()
+        try:
+            self._install_signal_handlers()
+            self._cleanup_orphaned_worktrees()
+            return await self._run_pipeline(dry_run)
+        finally:
+            self._release_lock()
+
+    async def _run_pipeline(self, dry_run: bool = False) -> bool:
         self.reporter.pipeline_start()
 
         recovered = self._recover_crashed_segments()
         if recovered:
             for name in recovered:
                 self.reporter._print(f"⚠️  Crash recovery: '{name}' was in-progress, marked failed")
+
+        if dry_run:
+            return self._dry_run()
 
         all_success = True
 
@@ -95,6 +192,24 @@ class Orchestrator:
 
         self.reporter.pipeline_complete()
         return all_success
+
+    def _dry_run(self) -> bool:
+        self.reporter._print("\n🏜️  DRY RUN — no changes will be made\n")
+        while True:
+            eligible = self._find_eligible_segments()
+            if not eligible:
+                break
+            for seg_index in eligible:
+                segment = self.config.segments[seg_index]
+                total = len(self.config.segments)
+                self.reporter._print(f"  Segment {seg_index + 1}/{total}: {segment.name}")
+                self.reporter._print(f"    → Would run agent: {self.config.agent_command}")
+                self.reporter._print(f"    → Would run preflight: build={self.config.preflight.build}, lint={self.config.preflight.lint}, test={self.config.preflight.test}")
+                self.reporter._print(f"    → Would commit, push, and tag")
+                self.reporter._print(f"    → Would verify deploy via {self.config.deploy.provider}")
+                segment.status = SegmentStatus.SHIPPED
+        self.reporter._print("\n🏜️  Dry run complete.")
+        return True
 
     async def _run_segment(self, index: int, segment: SegmentConfig) -> bool:
         self.reporter.segment_start(index, segment)
@@ -119,7 +234,7 @@ class Orchestrator:
         self._set_segment_status(segment, SegmentStatus.REPAIRING)
         self.reporter._print("   ❌ Preflight FAILED — entering repair loop")
 
-        preflight_result = await run_preflight(self.config.preflight, Path(self.config.repo))
+        preflight_result = ship_result.preflight_result
         repair_result = await run_repair_loop(
             self.config, segment.name, preflight_result,
             self.reporter, self.budget, self.learnings,
@@ -169,63 +284,25 @@ class Orchestrator:
         )))
 
     async def _ship_and_verify(self, segment: SegmentConfig) -> ShipResult:
-        from .deploy import verify_deployment
-        from .git_ops import (
-            commit,
-            create_tag,
-            get_changed_files,
-            get_short_sha,
-            push,
-            security_scan,
-            stage_files,
-        )
+        from .ship_utils import ship_and_verify
 
         repo = Path(self.config.repo)
+        sv_result = await ship_and_verify(self.config, segment, repo, self.reporter)
 
-        changed_files = await get_changed_files(repo)
-        if not changed_files:
-            return ShipResult(success=False, report=SegmentReport(
-                name=segment.name, status="failed", errors=["No changed files"],
-            ))
-
-        safe_files, blocked_files = security_scan(changed_files, self.config.blocked_patterns)
-        if blocked_files:
-            return ShipResult(success=False, report=SegmentReport(
-                name=segment.name, status="failed",
-                errors=[f"Blocked: {', '.join(blocked_files[:3])}"],
-            ))
-
-        if not safe_files:
-            return ShipResult(success=False, report=SegmentReport(
-                name=segment.name, status="failed", errors=["No safe files after scan"],
-            ))
-
-        await stage_files(safe_files, repo)
-        sha = await commit(f"feat(shiploop): {segment.name}", repo)
-        tag = await create_tag(segment.name, repo)
-        await push(repo, include_tags=True)
-
-        short_sha = await get_short_sha(repo)
-        self.reporter._print(f"   📦 Committed: {short_sha}")
-        self.reporter._print(f"   🏷  Tagged: {tag}")
-
-        self._set_segment_status(segment, SegmentStatus.VERIFYING)
-        verify_result = await verify_deployment(self.config.deploy, sha, self.config.site)
-
-        if verify_result.success:
-            self.reporter._print("   ✅ Deploy verified")
+        if sv_result.success:
             return ShipResult(
-                success=True, commit_sha=sha, tag=tag,
-                deploy_url=verify_result.deploy_url or "",
+                success=True, commit_sha=sv_result.commit_sha, tag=sv_result.tag,
+                deploy_url=sv_result.deploy_url,
                 report=SegmentReport(
                     name=segment.name, status="shipped",
-                    commit=sha, tag=tag, deploy_url=verify_result.deploy_url,
+                    commit=sv_result.commit_sha, tag=sv_result.tag,
+                    deploy_url=sv_result.deploy_url,
                 ),
             )
 
-        return ShipResult(success=False, commit_sha=sha, tag=tag, report=SegmentReport(
+        return ShipResult(success=False, commit_sha=sv_result.commit_sha, tag=sv_result.tag, report=SegmentReport(
             name=segment.name, status="failed",
-            errors=[f"Deploy verification failed: {verify_result.details}"],
+            errors=[sv_result.error or "Ship and verify failed"],
         ))
 
     def _mark_shipped(self, index: int, segment: SegmentConfig, result: ShipResult) -> bool:

@@ -22,6 +22,10 @@ shiploop init     # Auto-detects framework, creates SHIPLOOP.yml
 shiploop run      # Start the pipeline
 ```
 
+## Security Notice
+
+> **SHIPLOOP.yml is equivalent to running a script.** The `agent_command`, all preflight commands (`build`, `lint`, `test`), and custom deploy scripts execute with your full user privileges. Ship Loop does **not** sandbox these commands. **Never run `shiploop run` on an untrusted repository without first reviewing its SHIPLOOP.yml.** Treat the config file with the same caution you would give to a Makefile or CI pipeline definition.
+
 ## What It Does
 
 ```

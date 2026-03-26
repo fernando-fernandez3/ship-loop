@@ -53,8 +53,13 @@ class LearningsEngine:
             self.learnings = []
 
     def _save(self) -> None:
+        import os
         data = [learning.model_dump() for learning in self.learnings]
-        self.path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True))
+        content = yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.path.with_suffix(".yml.tmp")
+        tmp_path.write_text(content)
+        os.replace(str(tmp_path), str(self.path))
 
     def record(
         self,

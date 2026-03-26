@@ -54,7 +54,7 @@ class Verifier(DeployVerifier):
 
     def _check_url(self, url: str, deploy_header: str, marker: str | None) -> VerificationResult:
         req = Request(url, method="GET")
-        req.add_header("User-Agent", "shiploop/3.1")
+        req.add_header("User-Agent", "shiploop/4.0.0")
 
         try:
             with urlopen(req, timeout=15) as resp:

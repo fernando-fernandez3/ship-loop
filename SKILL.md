@@ -8,7 +8,7 @@ description: >
 metadata:
   openclaw:
     emoji: "🚢"
-    version: "3.1.0"
+    version: "4.0.0"
     requires:
       bins: ["git", "python3"]
       python: ["pyyaml>=6.0", "pydantic>=2.0"]
@@ -51,6 +51,10 @@ Orchestrate multi-segment feature work as a self-healing pipeline. Three nested 
 │  💰 Budget Tracker: token/cost tracking per run  │
 └──────────────────────────────────────────────────┘
 ```
+
+## Security Notice
+
+> **SHIPLOOP.yml is equivalent to running a script.** The `agent_command`, all preflight commands (`build`, `lint`, `test`), and custom deploy scripts execute with your full user privileges. Ship Loop does **not** sandbox these commands. **Never use on untrusted repos without reviewing the config.** Treat SHIPLOOP.yml with the same caution as a Makefile or CI pipeline.
 
 ## When to Use
 
