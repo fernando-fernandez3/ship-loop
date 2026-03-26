@@ -1,6 +1,11 @@
-# Ship Loop
+# 🚢 Ship Loop
 
-Self-healing multi-segment build pipeline with three nested loops, a learnings engine, and budget tracking.
+Self-healing build pipeline for AI coding agents. Define your features, point it at your agent, and it builds, tests, deploys, and verifies each one. When something breaks, it fixes itself. When fixes stall, it experiments with alternatives. It learns from every failure.
+
+[![PyPI version](https://badge.fury.io/py/shiploop.svg)](https://pypi.org/project/shiploop/)
+[![CI](https://github.com/fernando-fernandez3/ship-loop/actions/workflows/ci.yml/badge.svg)](https://github.com/fernando-fernandez3/ship-loop/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
 ## Install
 
@@ -8,28 +13,16 @@ Self-healing multi-segment build pipeline with three nested loops, a learnings e
 pip install shiploop
 ```
 
-Or from source:
-
-```bash
-git clone https://github.com/fernando-fernandez3/ship-loop.git
-cd ship-loop
-pip install -e .
-```
-
 ## Quick Start
 
 ```bash
-# Initialize a new config in your project
 cd /path/to/your/project
-shiploop init
-
-# Edit SHIPLOOP.yml to define your segments, then:
-shiploop run
+shiploop init     # Auto-detects framework, creates SHIPLOOP.yml
+# Edit SHIPLOOP.yml to define your segments
+shiploop run      # Start the pipeline
 ```
 
-`shiploop init` auto-detects your framework (Node, Python, Rust, Go), deploy provider (Vercel, Netlify), and sets sensible preflight defaults.
-
-## Architecture
+## What It Does
 
 ```
 ┌─────────────── LOOP 1: Ship ───────────────────┐
@@ -55,55 +48,31 @@ shiploop run
 └─────────────────────────────────────────────────┘
 ```
 
-**Loop 1 (Ship):** Code → preflight (build/lint/test) → git commit → push → deploy verify.
-Feeds relevant past learnings into the agent prompt.
+**Loop 1 (Ship):** Your coding agent builds the feature. Preflight runs build, lint, and tests. If everything passes, it commits, pushes, and verifies the deployment. Past learnings are injected into each agent prompt.
 
-**Loop 2 (Repair):** On preflight failure, captures error context and asks the agent to fix.
-Detects convergence (same error twice) and stops early.
+**Loop 2 (Repair):** When preflight fails, Ship Loop captures the error context and asks the agent to fix it. Detects error convergence (same error twice = stop early). Up to N attempts before escalating.
 
-**Loop 3 (Meta):** When repairs stall, runs meta-analysis to identify root cause, spawns N
-experiment branches in git worktrees, picks the simplest passing solution.
+**Loop 3 (Meta):** When repairs stall, Ship Loop runs a meta-analysis of all failures, spawns N experiment branches in git worktrees, runs each through preflight, and picks the simplest passing solution.
 
 ## Agent Presets
 
-Instead of writing the full agent command, use a preset name:
-
-| Preset | Command |
-|--------|---------|
-| `claude-code` | `claude --print --permission-mode bypassPermissions` |
-| `codex` | `codex --quiet` |
-| `aider` | `aider --yes-always --no-git` |
-
-In `SHIPLOOP.yml`:
+Use a preset name instead of the full command:
 
 ```yaml
-agent: claude-code       # uses preset
-# OR
-agent_command: "custom-agent --flag"  # custom command (takes precedence)
+# Pick one:
+agent: claude-code    # claude --print --permission-mode bypassPermissions
+agent: codex          # codex --quiet
+agent: aider          # aider --yes-always --no-git
+
+# Or use any command:
+agent_command: "your-agent --your-flags"
 ```
 
-## CLI Commands
-
-```bash
-shiploop init                        # Initialize SHIPLOOP.yml
-shiploop run                         # Start or resume pipeline
-shiploop status                      # Show segment states
-shiploop reset <segment>             # Reset a segment to pending
-shiploop learnings list              # List all recorded learnings
-shiploop learnings search <query>    # Search learnings by keyword
-shiploop budget                      # Show cost summary
-
-# Options
-shiploop -c /path/to/SHIPLOOP.yml run # Custom config path
-shiploop -v run                       # Verbose logging
-shiploop --version                    # Show version
-```
-
-## SHIPLOOP.yml
+## Example Config
 
 ```yaml
 project: "My App"
-repo: /absolute/path/to/project
+repo: /path/to/project
 site: https://myapp.vercel.app
 agent: claude-code
 
@@ -113,9 +82,8 @@ preflight:
   test: "npm test"
 
 deploy:
-  provider: vercel          # vercel | netlify | custom
+  provider: vercel       # vercel | netlify | custom
   routes: [/, /api/health]
-  timeout: 300
 
 repair:
   max_attempts: 3
@@ -127,55 +95,92 @@ meta:
 budget:
   max_usd_per_segment: 10.0
   max_usd_per_run: 50.0
-  halt_on_breach: true
-
-timeouts:
-  agent: 900                # 15 min per agent invocation
-  preflight: 300            # 5 min per preflight run
-  deploy: 300               # 5 min for deploy verification
 
 segments:
   - name: "dark-mode"
     prompt: |
       Add dark mode with CSS custom properties and a toggle button.
-    depends_on: []
 
   - name: "contact-form"
     prompt: |
-      Add contact form at /contact with API endpoint.
+      Add a contact form at /contact with a serverless API endpoint.
     depends_on: [dark-mode]
 ```
 
-## Project Structure
+## CLI
 
-```
-shiploop/
-├── __init__.py         # Package version
-├── cli.py              # CLI interface (argparse)
-├── config.py           # SHIPLOOP.yml parsing (Pydantic v2) + agent presets
-├── orchestrator.py     # State machine + DAG scheduler
-├── agent.py            # Shared agent runner with timeout enforcement
-├── loops/
-│   ├── ship.py         # Loop 1: happy path
-│   ├── repair.py       # Loop 2: auto-repair
-│   ├── optimize.py     # Prompt optimization via A/B testing
-│   └── meta.py         # Loop 3: meta-analysis + experiments
-├── preflight.py        # Build/lint/test runner
-├── git_ops.py          # Git operations + security scan
-├── deploy.py           # Deploy verification plugin loader
-├── budget.py           # Token/cost tracking
-├── learnings.py        # Failure learning engine
-├── reporting.py        # Status output + JSON reports
-└── providers/
-    ├── base.py         # Abstract verifier interface
-    ├── vercel.py       # Vercel deploy verification
-    ├── netlify.py      # Netlify deploy verification
-    └── custom.py       # Custom script provider
+```bash
+shiploop run                        # Start or resume pipeline
+shiploop status                     # Show segment states
+shiploop reset <segment>            # Reset a segment to pending
+shiploop learnings list             # List recorded learnings
+shiploop learnings search <query>   # Search by keyword
+shiploop budget                     # Show cost summary
+shiploop init                       # Create SHIPLOOP.yml interactively
 ```
 
-## Documentation
+## Features
 
-See [SKILL.md](SKILL.md) for full documentation: state machine, execution flow, deploy providers, rollback, crash recovery, and worked examples.
+- **Self-healing:** Three nested loops ensure maximum autonomy before asking for help
+- **Learnings engine:** Every failure-then-fix cycle creates a lesson. Future runs load relevant lessons into the agent prompt automatically.
+- **Budget tracking:** Monitor token usage and estimated costs per segment and per run. Set limits, halt on breach.
+- **Crash recovery:** State is checkpointed after every transition. Restart anytime and pick up where you left off.
+- **DAG scheduling:** Segments declare dependencies. Ship Loop resolves the graph and runs eligible segments in order.
+- **Security scanning:** Explicit file staging only. Never `git add -A`. Built-in blocked patterns for secrets, keys, and credentials.
+- **Deploy verification:** Pluggable providers for Vercel, Netlify, and custom scripts.
+- **Framework detection:** `shiploop init` auto-detects Node, Python, Rust, and Go projects.
+
+## What It Looks Like
+
+```
+🚢 Ship Loop: My App (2 segments)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔄 Segment 1/2: dark-mode
+   📚 No prior learnings
+   🤖 coding... → ✅ completed in 262s
+   🛫 preflight... → ✅ passed
+   📦 Committed: a1b2c3d
+   ✅ Deploy verified
+✅ dark-mode — shipped [7m 30s, $0.42]
+
+🔄 Segment 2/2: contact-form
+   📚 Loaded 1 learning(s)
+   🤖 coding... → ✅ completed in 310s
+   ❌ Preflight FAILED — entering repair loop
+   🔧 Repair 1/3 → ❌ lint errors
+   🔧 Repair 2/3 → ❌ test errors
+   🔧 Repair 3/3 → ❌ build error
+   🧪 Meta loop: 3 experiments
+   🏆 Winner: experiment 2 (12 lines)
+   📦 Committed: e5f6g7h
+   ✅ Deploy verified
+✅ contact-form — shipped [18m, $3.42]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🏁 2/2 segments shipped. Total: 25m 10s, $3.84
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+## From Source
+
+```bash
+git clone https://github.com/fernando-fernandez3/ship-loop.git
+cd ship-loop
+pip install -e ".[dev]"
+python -m pytest tests/ -x
+```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). We're especially looking for:
+- New deploy providers (AWS Amplify, Cloudflare Pages, Railway, Fly.io)
+- New agent presets
+- Framework detection for more languages
+
+## Background
+
+Ship Loop's three-loop architecture (ship → repair → meta-experiment) was designed from engineering intuition about how autonomous coding pipelines fail and recover. Interestingly, Meta's [Hyperagents](https://arxiv.org/abs/2603.19461) research (March 2026) independently arrived at similar patterns through open-ended optimization: their self-improving agents autonomously invented persistent memory, performance tracking, and experiment branching, the same core mechanisms Ship Loop uses in production.
 
 ## License
 
