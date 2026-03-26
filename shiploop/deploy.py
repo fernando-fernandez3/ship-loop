@@ -7,14 +7,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .config import DeployConfig
 
-from providers.base import DeployVerifier, VerificationResult
+from .providers.base import DeployVerifier, VerificationResult
 
 logger = logging.getLogger("shiploop.deploy")
 
 PROVIDER_MAP = {
-    "vercel": "providers.vercel",
-    "netlify": "providers.netlify",
-    "custom": "providers.custom",
+    "vercel": "shiploop.providers.vercel",
+    "netlify": "shiploop.providers.netlify",
+    "custom": "shiploop.providers.custom",
 }
 
 

@@ -4,11 +4,14 @@ import argparse
 import asyncio
 import json
 import logging
+import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
 from . import __version__
-from .config import load_config
+from .config import AGENT_PRESETS, load_config
 from .orchestrator import Orchestrator
 
 
@@ -34,6 +37,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # init
+    subparsers.add_parser("init", help="Initialize SHIPLOOP.yml in the current directory")
 
     # run
     subparsers.add_parser("run", help="Start or resume the pipeline")
@@ -66,7 +72,9 @@ def main(argv: list[str] | None = None) -> int:
     config_path = Path(args.config).resolve()
 
     try:
-        if args.command == "run":
+        if args.command == "init":
+            return _cmd_init()
+        elif args.command == "run":
             return _cmd_run(config_path)
         elif args.command == "status":
             return _cmd_status(config_path)
@@ -85,6 +93,110 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     return 0
+
+
+def _cmd_init() -> int:
+    cwd = Path.cwd()
+    config_file = cwd / "SHIPLOOP.yml"
+
+    if config_file.exists():
+        print(f"❌ SHIPLOOP.yml already exists in {cwd}", file=sys.stderr)
+        return 1
+
+    print(f"🚢 Ship Loop Init — {cwd.name}\n")
+
+    framework = _detect_framework(cwd)
+    if framework:
+        print(f"  Detected framework: {framework}")
+
+    preflight = _default_preflight(framework)
+    deploy_provider = _detect_deploy_provider(cwd)
+    git_remote = _detect_git_remote(cwd)
+
+    project_name = input(f"  Project name [{cwd.name}]: ").strip() or cwd.name
+    site_url = input("  Site URL (e.g. https://myapp.vercel.app): ").strip()
+
+    print(f"\n  Available agent presets: {', '.join(AGENT_PRESETS)}")
+    print("  Or enter a custom command.")
+    agent_input = input("  Agent [claude-code]: ").strip() or "claude-code"
+
+    is_preset = agent_input in AGENT_PRESETS
+    agent_field = "agent" if is_preset else "agent_command"
+
+    config_data: dict = {
+        "project": project_name,
+        "repo": str(cwd),
+        "site": site_url or "https://example.com",
+        agent_field: agent_input,
+    }
+
+    if preflight:
+        config_data["preflight"] = {k: v for k, v in preflight.items() if v}
+
+    if deploy_provider:
+        config_data["deploy"] = {"provider": deploy_provider}
+
+    config_data["segments"] = [
+        {
+            "name": "example-feature",
+            "prompt": "Describe what the agent should build.\n",
+        },
+    ]
+
+    config_file.write_text(
+        yaml.dump(config_data, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    )
+
+    print(f"\n✅ Created {config_file}")
+    if git_remote:
+        print(f"  Git remote: {git_remote}")
+    print("  Edit SHIPLOOP.yml to configure your segments, then run: shiploop run")
+    return 0
+
+
+def _detect_framework(cwd: Path) -> str | None:
+    markers = {
+        "package.json": "node",
+        "Cargo.toml": "rust",
+        "go.mod": "go",
+        "pyproject.toml": "python",
+        "setup.py": "python",
+    }
+    for marker, framework in markers.items():
+        if (cwd / marker).exists():
+            return framework
+    return None
+
+
+def _default_preflight(framework: str | None) -> dict[str, str | None]:
+    presets = {
+        "node": {"build": "npm run build", "lint": "npm run lint", "test": "npm test"},
+        "python": {"build": None, "lint": "ruff check .", "test": "pytest"},
+        "rust": {"build": "cargo build", "lint": "cargo clippy", "test": "cargo test"},
+        "go": {"build": "go build ./...", "lint": "golangci-lint run", "test": "go test ./..."},
+    }
+    return presets.get(framework or "", {"build": None, "lint": None, "test": None})
+
+
+def _detect_deploy_provider(cwd: Path) -> str | None:
+    if (cwd / "vercel.json").exists():
+        return "vercel"
+    if (cwd / "netlify.toml").exists():
+        return "netlify"
+    return None
+
+
+def _detect_git_remote(cwd: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=cwd, capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return None
 
 
 def _cmd_run(config_path: Path) -> int:

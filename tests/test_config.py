@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from src.config import (
+from shiploop.config import (
     BranchStrategy,
     SegmentStatus,
     ShipLoopConfig,

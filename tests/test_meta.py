@@ -1,6 +1,6 @@
 import pytest
 
-from src.loops.meta import _build_failure_context, _build_meta_prompt, _parse_experiments
+from shiploop.loops.meta import _build_failure_context, _build_meta_prompt, _parse_experiments
 
 
 class TestParseExperiments:

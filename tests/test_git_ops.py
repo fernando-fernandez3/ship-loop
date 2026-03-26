@@ -1,6 +1,6 @@
 import pytest
 
-from src.git_ops import ALWAYS_BLOCKED, security_scan
+from shiploop.git_ops import ALWAYS_BLOCKED, security_scan
 
 
 class TestSecurityScan:

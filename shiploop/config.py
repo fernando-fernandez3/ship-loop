@@ -89,6 +89,13 @@ class DeployConfig(BaseModel):
     timeout: int = 300
 
 
+AGENT_PRESETS: dict[str, str] = {
+    "claude-code": "claude --print --permission-mode bypassPermissions",
+    "codex": "codex --quiet",
+    "aider": "aider --yes-always --no-git",
+}
+
+
 class ShipLoopConfig(BaseModel):
     project: str
     repo: str
@@ -96,7 +103,8 @@ class ShipLoopConfig(BaseModel):
     platform: str = "vercel"
     branch_strategy: BranchStrategy = Field(default=BranchStrategy.PR, alias="branch")
     mode: str = "solo"
-    agent_command: str
+    agent: str | None = None
+    agent_command: str = ""
     preflight: PreflightConfig = PreflightConfig()
     deploy: DeployConfig = Field(default_factory=DeployConfig)
     repair: RepairConfig = RepairConfig()
@@ -124,6 +132,22 @@ class ShipLoopConfig(BaseModel):
         if "branch" not in data and "branch_strategy" in data:
             data["branch"] = data.pop("branch_strategy")
         return data
+
+    @model_validator(mode="after")
+    def resolve_agent_preset(self) -> ShipLoopConfig:
+        if self.agent_command:
+            return self
+        if self.agent and self.agent in AGENT_PRESETS:
+            self.agent_command = AGENT_PRESETS[self.agent]
+        elif self.agent:
+            raise ValueError(
+                f"Unknown agent preset '{self.agent}'. "
+                f"Available: {', '.join(AGENT_PRESETS)}. "
+                f"Or set agent_command directly."
+            )
+        if not self.agent_command:
+            raise ValueError("Either 'agent' or 'agent_command' must be set")
+        return self
 
 
 def load_config(config_path: Path) -> ShipLoopConfig:

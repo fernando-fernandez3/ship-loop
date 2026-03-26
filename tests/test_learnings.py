@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from src.learnings import (
+from shiploop.learnings import (
     LearningsEngine,
     _compute_error_signature,
     _extract_keywords,

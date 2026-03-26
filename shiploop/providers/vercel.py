@@ -10,11 +10,12 @@ from urllib.error import URLError
 from .base import DeployVerifier, VerificationResult
 
 if TYPE_CHECKING:
-    from src.config import DeployConfig
+    from shiploop.config import DeployConfig
 
-logger = logging.getLogger("shiploop.deploy.netlify")
+logger = logging.getLogger("shiploop.deploy.vercel")
 
 POLL_INTERVAL = 10
+MAX_RETRIES = 3
 
 
 class Verifier(DeployVerifier):
@@ -26,6 +27,8 @@ class Verifier(DeployVerifier):
     ) -> VerificationResult:
         start = time.monotonic()
         timeout = config.timeout
+        deploy_header = config.deploy_header or "x-vercel-deployment-url"
+
         deadline = start + timeout
         last_error = ""
 
@@ -33,7 +36,7 @@ class Verifier(DeployVerifier):
             for route in config.routes:
                 url = site_url.rstrip("/") + route
                 try:
-                    result = await asyncio.to_thread(self._check_url, url, config.marker)
+                    result = await asyncio.to_thread(self._check_url, url, deploy_header, config.marker)
                     if result.success:
                         result.duration_seconds = time.monotonic() - start
                         return result
@@ -49,7 +52,7 @@ class Verifier(DeployVerifier):
             duration_seconds=time.monotonic() - start,
         )
 
-    def _check_url(self, url: str, marker: str | None) -> VerificationResult:
+    def _check_url(self, url: str, deploy_header: str, marker: str | None) -> VerificationResult:
         req = Request(url, method="GET")
         req.add_header("User-Agent", "shiploop/3.1")
 
@@ -64,16 +67,17 @@ class Verifier(DeployVerifier):
         if status != 200:
             return VerificationResult(success=False, details=f"HTTP {status} for {url}")
 
-        deploy_url = headers.get("x-nf-request-id")
+        deploy_url = headers.get(deploy_header.lower())
 
         if marker and marker not in body:
             return VerificationResult(
                 success=False,
+                deploy_url=deploy_url,
                 details=f"Marker '{marker}' not found in response body",
             )
 
         return VerificationResult(
             success=True,
             deploy_url=deploy_url or url,
-            details="HTTP 200 OK",
+            details=f"HTTP 200 OK",
         )

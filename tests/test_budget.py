@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from src.budget import BudgetConfig, BudgetTracker, UsageRecord, estimate_cost, estimate_from_prompt, parse_token_usage
+from shiploop.budget import BudgetConfig, BudgetTracker, UsageRecord, estimate_cost, estimate_from_prompt, parse_token_usage
 
 
 @pytest.fixture

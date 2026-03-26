@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from .base import DeployVerifier, VerificationResult
 
 if TYPE_CHECKING:
-    from src.config import DeployConfig
+    from shiploop.config import DeployConfig
 
 logger = logging.getLogger("shiploop.deploy.custom")
 

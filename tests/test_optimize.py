@@ -4,10 +4,10 @@ from unittest.mock import patch
 
 import pytest
 
-from src.budget import BudgetConfig, BudgetTracker, UsageRecord
-from src.config import OptimizationConfig, ShipLoopConfig
-from src.learnings import Learning, LearningsEngine
-from src.loops.optimize import (
+from shiploop.budget import BudgetConfig, BudgetTracker, UsageRecord
+from shiploop.config import OptimizationConfig, ShipLoopConfig
+from shiploop.learnings import Learning, LearningsEngine
+from shiploop.loops.optimize import (
     OptimizationResult,
     _build_analysis_prompt,
     _evaluate_outcomes,

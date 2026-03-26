@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from src.config import DeployConfig
+    from shiploop.config import DeployConfig
 
 
 class VerificationResult(BaseModel):

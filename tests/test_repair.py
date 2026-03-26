@@ -1,7 +1,7 @@
 import hashlib
 
-from src.loops.repair import _build_repair_prompt, _compute_error_signature
-from src.preflight import PreflightResult
+from shiploop.loops.repair import _build_repair_prompt, _compute_error_signature
+from shiploop.preflight import PreflightResult
 
 
 class TestConvergenceDetection:

@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from src.config import SegmentStatus, load_config, save_config
-from src.orchestrator import Orchestrator
+from shiploop.config import SegmentStatus, load_config, save_config
+from shiploop.orchestrator import Orchestrator
 
 
 @pytest.fixture

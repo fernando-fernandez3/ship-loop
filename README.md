@@ -1,18 +1,33 @@
-# Ship Loop v3.1
+# Ship Loop
 
 Self-healing multi-segment build pipeline with three nested loops, a learnings engine, and budget tracking.
+
+## Install
+
+```bash
+pip install shiploop
+```
+
+Or from source:
+
+```bash
+git clone https://github.com/fernando-fernandez3/ship-loop.git
+cd ship-loop
+pip install -e .
+```
 
 ## Quick Start
 
 ```bash
-pip install pyyaml pydantic
-```
+# Initialize a new config in your project
+cd /path/to/your/project
+shiploop init
 
-Create `SHIPLOOP.yml` in your project, then:
-
-```bash
+# Edit SHIPLOOP.yml to define your segments, then:
 shiploop run
 ```
+
+`shiploop init` auto-detects your framework (Node, Python, Rust, Go), deploy provider (Vercel, Netlify), and sets sensible preflight defaults.
 
 ## Architecture
 
@@ -49,15 +64,34 @@ Detects convergence (same error twice) and stops early.
 **Loop 3 (Meta):** When repairs stall, runs meta-analysis to identify root cause, spawns N
 experiment branches in git worktrees, picks the simplest passing solution.
 
+## Agent Presets
+
+Instead of writing the full agent command, use a preset name:
+
+| Preset | Command |
+|--------|---------|
+| `claude-code` | `claude --print --permission-mode bypassPermissions` |
+| `codex` | `codex --quiet` |
+| `aider` | `aider --yes-always --no-git` |
+
+In `SHIPLOOP.yml`:
+
+```yaml
+agent: claude-code       # uses preset
+# OR
+agent_command: "custom-agent --flag"  # custom command (takes precedence)
+```
+
 ## CLI Commands
 
 ```bash
-shiploop run                          # Start or resume pipeline
-shiploop status                       # Show segment states
-shiploop reset <segment>              # Reset a segment to pending
-shiploop learnings list               # List all recorded learnings
-shiploop learnings search <query>     # Search learnings by keyword
-shiploop budget                       # Show cost summary
+shiploop init                        # Initialize SHIPLOOP.yml
+shiploop run                         # Start or resume pipeline
+shiploop status                      # Show segment states
+shiploop reset <segment>             # Reset a segment to pending
+shiploop learnings list              # List all recorded learnings
+shiploop learnings search <query>    # Search learnings by keyword
+shiploop budget                      # Show cost summary
 
 # Options
 shiploop -c /path/to/SHIPLOOP.yml run # Custom config path
@@ -71,7 +105,7 @@ shiploop --version                    # Show version
 project: "My App"
 repo: /absolute/path/to/project
 site: https://myapp.vercel.app
-agent_command: "claude --print --permission-mode bypassPermissions"
+agent: claude-code
 
 preflight:
   build: "npm run build"
@@ -115,33 +149,28 @@ segments:
 ## Project Structure
 
 ```
-src/
+shiploop/
+├── __init__.py         # Package version
 ├── cli.py              # CLI interface (argparse)
-├── config.py           # SHIPLOOP.yml parsing (Pydantic v2)
+├── config.py           # SHIPLOOP.yml parsing (Pydantic v2) + agent presets
 ├── orchestrator.py     # State machine + DAG scheduler
 ├── agent.py            # Shared agent runner with timeout enforcement
 ├── loops/
 │   ├── ship.py         # Loop 1: happy path
 │   ├── repair.py       # Loop 2: auto-repair
+│   ├── optimize.py     # Prompt optimization via A/B testing
 │   └── meta.py         # Loop 3: meta-analysis + experiments
 ├── preflight.py        # Build/lint/test runner
 ├── git_ops.py          # Git operations + security scan
 ├── deploy.py           # Deploy verification plugin loader
 ├── budget.py           # Token/cost tracking
 ├── learnings.py        # Failure learning engine
-└── reporting.py        # Status output + JSON reports
-providers/
-├── vercel.py           # Vercel deploy verification
-├── netlify.py          # Netlify deploy verification
-└── custom.py           # Custom script provider
-tests/
-├── test_config.py
-├── test_orchestrator.py
-├── test_git_ops.py
-├── test_budget.py
-├── test_learnings.py
-├── test_repair.py
-└── test_meta.py
+├── reporting.py        # Status output + JSON reports
+└── providers/
+    ├── base.py         # Abstract verifier interface
+    ├── vercel.py       # Vercel deploy verification
+    ├── netlify.py      # Netlify deploy verification
+    └── custom.py       # Custom script provider
 ```
 
 ## Documentation
