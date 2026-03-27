@@ -185,6 +185,13 @@ async def run_meta_loop(
     )
 
 
+# Emitted events for meta loop visibility (used by orchestrator event queue):
+# - "meta_analysis_complete": after meta-analysis agent finishes
+# - "experiment_passed": when an experiment passes preflight
+# - "meta_done": when winner is merged (emitted by orchestrator)
+
+
+
 def _build_failure_context(segment_name: str, prompt: str, all_errors: list[str]) -> str:
     lines = [
         f"# Failure History for: {segment_name}",

@@ -25,6 +25,7 @@ class ShipResult:
     deploy_url: str = ""
     report: SegmentReport | None = None
     preflight_result: PreflightResult | None = None
+    injected_learning_ids: list[str] | None = None
 
 
 async def run_ship_loop(
@@ -40,6 +41,7 @@ async def run_ship_loop(
     loop_start = time.monotonic()
 
     relevant_learnings = learnings.search(segment.prompt)
+    injected_learning_ids = [l.id for l in relevant_learnings]
     learnings_prefix = learnings.format_for_prompt(relevant_learnings)
 
     augmented_prompt = segment.prompt
@@ -112,10 +114,15 @@ async def run_ship_loop(
     report.cost_usd = budget.get_segment_cost(segment.name)
     report.duration_seconds = time.monotonic() - loop_start
 
+    # Score learnings: segment shipped first-try → bump scores
+    if injected_learning_ids:
+        learnings.on_segment_success(injected_learning_ids)
+
     return ShipResult(
         success=True,
         commit_sha=sv_result.commit_sha,
         tag=sv_result.tag,
         deploy_url=sv_result.deploy_url,
         report=report,
+        injected_learning_ids=injected_learning_ids,
     )

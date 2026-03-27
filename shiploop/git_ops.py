@@ -173,3 +173,23 @@ async def get_diff(cwd: Path, max_lines: int = 500) -> str:
 async def get_diff_stat(cwd: Path) -> str:
     _, stat, _ = await run_git(["diff", "--stat", "HEAD"], cwd, check=False)
     return stat
+
+
+async def get_touched_paths(cwd: Path) -> list[str]:
+    """Return list of files changed in the latest commit."""
+    _, out, _ = await run_git(
+        ["diff-tree", "--no-commit-id", "-r", "--name-only", "HEAD"],
+        cwd, check=False,
+    )
+    if not out:
+        # Fallback: diff against parent
+        _, out, _ = await run_git(
+            ["show", "--stat", "--format=", "HEAD"],
+            cwd, check=False,
+        )
+    paths: list[str] = []
+    for line in out.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("..."):
+            paths.append(stripped)
+    return paths

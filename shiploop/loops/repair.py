@@ -29,6 +29,7 @@ async def run_repair_loop(
     reporter: Reporter,
     budget: BudgetTracker,
     learnings: LearningsEngine,
+    run_id: str | None = None,
 ) -> RepairResult:
     repo = Path(config.repo)
     max_attempts = config.repair.max_attempts
@@ -65,6 +66,14 @@ async def run_repair_loop(
 
         if not agent_result.success:
             reporter.repair_failure(segment_name, attempt, f"Agent failed: {agent_result.error[:100]}")
+            # Check if this is a case the system didn't know how to handle
+            if "unhandled" in agent_result.error.lower() or attempt == max_attempts:
+                learnings.record_decision_gap(
+                    segment=segment_name,
+                    context=f"Repair agent failed on attempt {attempt}: {agent_result.error[:300]}",
+                    verdict="repair_agent_failed",
+                    run_id=run_id,
+                )
             continue
 
         preflight_result = await run_preflight(
@@ -78,6 +87,16 @@ async def run_repair_loop(
                 learnings, segment_name, last_preflight, attempt,
             )
             return RepairResult(success=True, attempts_used=attempt)
+
+        error_matches_known = _check_matches_known_learning(learnings, preflight_result.combined_output)
+        if not error_matches_known and attempt == max_attempts:
+            # Emit MISSING_DECISION_BRANCH: repair failed with an unknown error
+            learnings.record_decision_gap(
+                segment=segment_name,
+                context=f"Repair exhausted with unmatched error: {preflight_result.combined_output[:500]}",
+                verdict="repair_exhausted_unknown_error",
+                run_id=run_id,
+            )
 
         reporter.repair_failure(segment_name, attempt, preflight_result.errors[0] if preflight_result.errors else "unknown")
         last_preflight = preflight_result
@@ -120,6 +139,14 @@ so the code builds, lints, and tests cleanly.
 4. Ensure the project builds, lints, and tests pass
 5. Do NOT remove or disable tests to make them pass
 """
+
+
+def _check_matches_known_learning(learnings: LearningsEngine, error_text: str) -> bool:
+    """Return True if this error matches any known learning (so we know how to handle it)."""
+    if not error_text:
+        return False
+    results = learnings.search(error_text[:300], max_results=1)
+    return len(results) > 0
 
 
 def _record_repair_learning(

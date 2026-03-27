@@ -76,6 +76,12 @@ class TimeoutsConfig(BaseModel):
     preflight: int = 300
 
 
+class ReflectionConfig(BaseModel):
+    enabled: bool = True
+    auto_run: bool = True
+    history_depth: int = 10
+
+
 class PreflightConfig(BaseModel):
     build: str | None = None
     lint: str | None = None
@@ -115,6 +121,8 @@ class ShipLoopConfig(BaseModel):
     optimization: OptimizationConfig = OptimizationConfig()
     budget: BudgetConfig = BudgetConfig()
     timeouts: TimeoutsConfig = TimeoutsConfig()
+    reflection: ReflectionConfig = ReflectionConfig()
+    router: dict[str, str] = {}
     blocked_patterns: list[str] = []
     segments: list[SegmentConfig]
 

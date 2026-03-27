@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shiploop"
-version = "4.0.0"
+version = "5.0.0"
 description = "Self-healing multi-segment build pipeline with three nested loops"
 readme = "README.md"
 license = "MIT"

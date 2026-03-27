@@ -69,6 +69,19 @@ def main(argv: list[str] | None = None) -> int:
     # budget
     subparsers.add_parser("budget", help="Show cost summary")
 
+    # reflect
+    reflect_parser = subparsers.add_parser("reflect", help="Run meta-reflection on recent run history")
+    reflect_parser.add_argument("--depth", type=int, default=10, help="How many past runs to analyze (default: 10)")
+
+    # events
+    events_parser = subparsers.add_parser("events", help="View event history for a run")
+    events_parser.add_argument("run_id", nargs="?", help="Run ID (omit for latest run)")
+    events_parser.add_argument("--limit", type=int, default=50, help="Max events to show")
+
+    # history
+    history_parser = subparsers.add_parser("history", help="View past run history")
+    history_parser.add_argument("--limit", type=int, default=20, help="Max runs to show")
+
     args = parser.parse_args(argv)
 
     _setup_logging(args.verbose)
@@ -92,6 +105,12 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_learnings(config_path, args)
         elif args.command == "budget":
             return _cmd_budget(config_path)
+        elif args.command == "reflect":
+            return _cmd_reflect(config_path, depth=getattr(args, "depth", 10))
+        elif args.command == "events":
+            return _cmd_events(config_path, run_id=getattr(args, "run_id", None), limit=getattr(args, "limit", 50))
+        elif args.command == "history":
+            return _cmd_history(config_path, limit=getattr(args, "limit", 20))
     except FileNotFoundError as e:
         print(f"❌ {e}", file=sys.stderr)
         return 1
@@ -236,13 +255,15 @@ def _cmd_run(config_path: Path, dry_run: bool = False, notify_command: str | Non
 
 
 def _cmd_status(config_path: Path) -> int:
+    from .db import get_db
     from .learnings import LearningsEngine
 
     orchestrator = Orchestrator(config_path)
     statuses = orchestrator.get_status()
 
-    learnings_path = Path(orchestrator.config.repo) / "learnings.yml"
-    learnings_engine = LearningsEngine(learnings_path)
+    # Prefer DB-backed learnings engine
+    db = get_db(Path(orchestrator.config.repo))
+    learnings_engine = LearningsEngine(Path(orchestrator.config.repo) / "learnings.yml", db=db)
     optimization_segments = {
         l.segment for l in learnings_engine.learnings if l.learning_type == "optimization"
     }
@@ -340,6 +361,88 @@ def _cmd_budget(config_path: Path) -> int:
             print(f"    {seg}: ${cost:.2f}")
 
     print("━" * 50)
+    return 0
+
+
+def _cmd_reflect(config_path: Path, depth: int = 10) -> int:
+    import asyncio
+    from .config import load_config
+    from .db import get_db
+    from .loops.reflect import run_reflect_loop, format_report
+
+    config = load_config(config_path)
+    db = get_db(Path(config.repo))
+    report = asyncio.run(run_reflect_loop(db, depth=depth))
+    print(format_report(report))
+    return 0
+
+
+def _cmd_events(config_path: Path, run_id: str | None = None, limit: int = 50) -> int:
+    from .config import load_config
+    from .db import get_db
+
+    config = load_config(config_path)
+    db = get_db(Path(config.repo))
+
+    if run_id is None:
+        # Use latest run
+        runs = db.list_runs(limit=1)
+        if not runs:
+            print("No runs recorded yet.")
+            return 0
+        run_id = runs[0]["id"]
+        print(f"Showing events for latest run: {run_id[:8]}…")
+
+    events = db.get_events(run_id, limit=limit)
+    if not events:
+        print(f"No events found for run {run_id}")
+        return 0
+
+    print(f"\n📋 Events for run {run_id[:8]}…")
+    print("━" * 60)
+    for ev in reversed(events):
+        ts = ev.get("created_at", "")[:19].replace("T", " ")
+        seg = ev.get("segment_name") or "pipeline"
+        etype = ev.get("event_type", "")
+        processed = "✓" if ev.get("processed_at") else "○"
+        data = ev.get("data", {})
+        data_str = ""
+        if data:
+            data_str = " " + " ".join(f"{k}={v}" for k, v in data.items() if v)
+        print(f"  {processed} {ts}  [{seg}] {etype}{data_str}")
+    print("━" * 60)
+    return 0
+
+
+def _cmd_history(config_path: Path, limit: int = 20) -> int:
+    from .config import load_config
+    from .db import get_db
+
+    config = load_config(config_path)
+    db = get_db(Path(config.repo))
+
+    runs = db.list_runs(limit=limit)
+    if not runs:
+        print("No runs recorded yet.")
+        return 0
+
+    print(f"\n📜 Run History: {config.project}")
+    print("━" * 70)
+    for run in runs:
+        run_id_short = run["id"][:8]
+        started = run.get("started_at", "")[:19].replace("T", " ")
+        finished = run.get("finished_at", "")
+        status = run.get("status", "unknown")
+        cost = run.get("total_cost_usd", 0.0)
+
+        duration_str = ""
+        if finished:
+            finished_short = finished[:19].replace("T", " ")
+            duration_str = f" → {finished_short}"
+
+        status_icon = {"success": "✅", "failed": "❌", "running": "🔄"}.get(status, "▶")
+        print(f"  {status_icon} {run_id_short}  {started}{duration_str}  ${cost:.4f}")
+    print("━" * 70)
     return 0
 
 

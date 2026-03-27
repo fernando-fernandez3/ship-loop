@@ -8,6 +8,7 @@ import os
 import shutil
 import signal
 import time
+import uuid
 from pathlib import Path
 
 from .budget import BudgetTracker
@@ -18,15 +19,17 @@ from .config import (
     load_config,
     save_config,
 )
+from .db import Database, get_db
 from .deploy import verify_deployment
+from .git_ops import get_diff, get_diff_stat, get_touched_paths
 from .learnings import LearningsEngine
-from .git_ops import get_diff, get_diff_stat
 from .loops.meta import run_meta_loop
 from .loops.optimize import run_optimization_loop
 from .loops.repair import run_repair_loop
 from .loops.ship import ShipResult, run_ship_loop
 from .preflight import run_preflight
 from .reporting import Reporter, SegmentReport
+from .router import Action, Verdict, VerdictRouter
 
 logger = logging.getLogger("shiploop.orchestrator")
 
@@ -37,23 +40,38 @@ class Orchestrator:
         self.config = load_config(config_path)
         self.repo = Path(self.config.repo)
 
-        metrics_dir = self.repo / ".shiploop"
-        self.budget = BudgetTracker(self.config.budget, metrics_dir)
+        # SQLite database — primary state store in v5.0
+        self.db: Database = get_db(self.repo)
+        self.run_id: str = str(uuid.uuid4())
 
+        metrics_dir = self.repo / ".shiploop"
+        self.budget = BudgetTracker(
+            self.config.budget, metrics_dir,
+            db=self.db, run_id=self.run_id,
+        )
+
+        # LearningsEngine uses DB backend
         learnings_path = self.repo / "learnings.yml"
-        self.learnings = LearningsEngine(learnings_path)
+        self.learnings = LearningsEngine(learnings_path, db=self.db)
 
         self.reporter = Reporter(self.config)
+        self.router = VerdictRouter.from_config(self.config.router or {})
+
         self._optimization_tasks: list[asyncio.Task] = []
         self._lock_file = None
         self._active_processes: list[asyncio.subprocess.Process] = []
 
     def _checkpoint(self) -> None:
+        """Legacy YAML checkpoint — kept for backward compat with external tooling.
+        Runtime state is now in SQLite; config is source of truth for segments definition.
+        """
         save_config(self.config, self.config_path)
 
     def _set_segment_status(self, segment: SegmentConfig, status: SegmentStatus) -> None:
         segment.status = status
         self._checkpoint()
+        # Also persist to DB
+        self.db.update_segment_status(self.run_id, segment.name, status.value)
 
     def _find_eligible_segments(self) -> list[int]:
         shipped = {s.name for s in self.config.segments if s.status == SegmentStatus.SHIPPED}
@@ -164,6 +182,18 @@ class Orchestrator:
             self._release_lock()
 
     async def _run_pipeline(self, dry_run: bool = False) -> bool:
+        # Create DB run record
+        self.db.create_run(self.run_id, self.config.project)
+        # Seed segment records
+        for seg in self.config.segments:
+            self.db.upsert_segment(
+                run_id=self.run_id,
+                name=seg.name,
+                status=seg.status.value,
+                prompt=seg.prompt,
+                depends_on=seg.depends_on,
+            )
+
         self.reporter.pipeline_start()
 
         recovered = self._recover_crashed_segments()
@@ -172,7 +202,9 @@ class Orchestrator:
                 self.reporter._print(f"⚠️  Crash recovery: '{name}' was in-progress, marked failed")
 
         if dry_run:
-            return self._dry_run()
+            result = self._dry_run()
+            self.db.finish_run(self.run_id, "success" if result else "failed")
+            return result
 
         all_success = True
 
@@ -189,6 +221,13 @@ class Orchestrator:
 
         if self._optimization_tasks:
             await asyncio.gather(*self._optimization_tasks, return_exceptions=True)
+
+        # Post-pipeline: auto-reflect if enabled
+        if self.config.reflection.enabled and self.config.reflection.auto_run:
+            await self._auto_reflect()
+
+        total_cost = self.budget.get_run_cost()
+        self.db.finish_run(self.run_id, "success" if all_success else "failed", total_cost)
 
         self.reporter.pipeline_complete()
         return all_success
@@ -214,23 +253,44 @@ class Orchestrator:
     async def _run_segment(self, index: int, segment: SegmentConfig) -> bool:
         self.reporter.segment_start(index, segment)
 
+        # Cross-segment convergence: warn if prior segments touched same files
+        await self._inject_file_overlap_warning(segment)
+
         # Phase 1: Ship loop (code → preflight → ship → verify)
         self._set_segment_status(segment, SegmentStatus.CODING)
+        self.db.emit_event(self.run_id, segment.name, "agent_started")
 
         ship_result = await run_ship_loop(
             self.config, segment, index,
             self.reporter, self.budget, self.learnings,
         )
 
-        if ship_result.success:
+        verdict = self._assess_ship_verdict(ship_result)
+        action = self.router.route(verdict)
+        self.db.emit_event(self.run_id, segment.name, "preflight_passed" if ship_result.success else "preflight_failed",
+                           {"verdict": verdict.value, "action": action.value})
+
+        if action == Action.SHIP and ship_result.success:
+            # Record touched paths to DB after shipping
+            await self._record_touched_paths(segment)
+            self.db.emit_event(self.run_id, segment.name, "segment_shipped")
             return self._mark_shipped(index, segment, ship_result)
 
-        # If agent failed (not preflight), bail
-        report = ship_result.report
-        if report and report.errors and "Agent failed" in report.errors[0]:
+        if action == Action.FAIL:
+            self.db.emit_event(self.run_id, segment.name, "segment_failed", {"reason": verdict.value})
             return self._mark_failed(index, segment, ship_result)
 
-        # Phase 2: Repair loop (preflight failed)
+        if action == Action.PAUSE_AND_ALERT:
+            self.learnings.record_decision_gap(
+                segment=segment.name,
+                context=f"Unexpected verdict: {verdict.value}",
+                verdict=verdict.value,
+                run_id=self.run_id,
+            )
+            self.db.emit_event(self.run_id, segment.name, "segment_failed", {"reason": "pause_and_alert"})
+            return self._mark_failed(index, segment, ship_result)
+
+        # Phase 2: Repair loop (preflight failed or converged)
         self._set_segment_status(segment, SegmentStatus.REPAIRING)
         self.reporter._print("   ❌ Preflight FAILED — entering repair loop")
 
@@ -238,9 +298,12 @@ class Orchestrator:
         repair_result = await run_repair_loop(
             self.config, segment.name, preflight_result,
             self.reporter, self.budget, self.learnings,
+            run_id=self.run_id,
         )
 
         if repair_result.success:
+            self.db.emit_event(self.run_id, segment.name, "repair_done", {"attempts": repair_result.attempts_used})
+
             repair_diff = await get_diff(Path(self.config.repo))
             repair_diff_stat = await get_diff_stat(Path(self.config.repo))
             repair_diff_lines = len(repair_diff_stat.strip().splitlines()) if repair_diff_stat.strip() else 0
@@ -248,6 +311,8 @@ class Orchestrator:
             self._set_segment_status(segment, SegmentStatus.SHIPPING)
             ship_result = await self._ship_and_verify(segment)
             if ship_result.success:
+                await self._record_touched_paths(segment)
+                self.db.emit_event(self.run_id, segment.name, "segment_shipped")
                 result = self._mark_shipped(index, segment, ship_result)
 
                 task = asyncio.create_task(self._run_optimization(
@@ -257,9 +322,24 @@ class Orchestrator:
                 self._optimization_tasks.append(task)
 
                 return result
+
+            self.db.emit_event(self.run_id, segment.name, "deploy_failed")
             return self._mark_failed(index, segment, ship_result)
 
-        # Phase 3: Meta loop (repair exhausted)
+        # Check if converged — route through verdict router
+        if repair_result.converged:
+            repair_verdict = Verdict.CONVERGED
+        else:
+            repair_verdict = Verdict.REPAIR_EXHAUSTED
+
+        repair_action = self.router.route(repair_verdict)
+        self.db.emit_event(self.run_id, segment.name, "repair_failed",
+                           {"verdict": repair_verdict.value, "action": repair_action.value})
+
+        if repair_action == Action.FAIL:
+            return self._mark_failed(index, segment, ship_result)
+
+        # Phase 3: Meta loop (repair exhausted / converged)
         self._set_segment_status(segment, SegmentStatus.EXPERIMENTING)
         all_errors = [preflight_result.combined_output]
 
@@ -269,19 +349,86 @@ class Orchestrator:
         )
 
         if meta_result.success:
-            # Meta loop merged a winner — ship the changes
+            self.db.emit_event(self.run_id, segment.name, "meta_done",
+                               {"winner": meta_result.winner_experiment})
             self._set_segment_status(segment, SegmentStatus.SHIPPING)
             ship_result = await self._ship_and_verify(segment)
             if ship_result.success:
+                await self._record_touched_paths(segment)
+                self.db.emit_event(self.run_id, segment.name, "segment_shipped")
                 return self._mark_shipped(index, segment, ship_result)
+            self.db.emit_event(self.run_id, segment.name, "deploy_failed")
             return self._mark_failed(index, segment, ship_result)
 
+        self.db.emit_event(self.run_id, segment.name, "segment_failed", {"reason": "all_loops_exhausted"})
         return self._mark_failed(index, segment, ShipResult(success=False, report=SegmentReport(
             name=segment.name, status="failed",
             repair_attempts=repair_result.attempts_used,
             meta_experiments=meta_result.experiments_tried,
             errors=["All loops exhausted"],
         )))
+
+    def _assess_ship_verdict(self, ship_result: ShipResult) -> Verdict:
+        """Translate ShipResult into a Verdict for routing."""
+        if ship_result.success:
+            return Verdict.SUCCESS
+
+        report = ship_result.report
+        if report and report.errors:
+            first_error = report.errors[0]
+            if "Agent failed" in first_error:
+                return Verdict.AGENT_FAIL
+            if "no file changes" in first_error.lower():
+                return Verdict.NO_CHANGES
+            if "Budget exceeded" in first_error:
+                return Verdict.BUDGET_EXCEEDED
+
+        # Preflight failure — repair loop territory
+        if ship_result.preflight_result and not ship_result.preflight_result.passed:
+            return Verdict.PREFLIGHT_FAIL
+
+        return Verdict.UNKNOWN
+
+    async def _inject_file_overlap_warning(self, segment: SegmentConfig) -> None:
+        """Check if any shipped segments touched the same files and inject a warning."""
+        shipped_paths = self.db.get_all_shipped_touched_paths(self.run_id)
+        if not shipped_paths:
+            return
+
+        # We don't have touched_paths for this segment yet (it hasn't run), but we
+        # can check if any prior touched paths seem relevant based on segment name.
+        # The actual injection happens inside run_ship_loop via the augmented prompt.
+        # Here we just log warnings and store them for the agent to see.
+        overlapping: dict[str, list[str]] = {}
+        for other_name, paths in shipped_paths.items():
+            if other_name != segment.name and paths:
+                overlapping[other_name] = paths
+
+        if overlapping:
+            # Store overlap warning as an event — run_ship_loop can pick it up
+            self.db.emit_event(
+                self.run_id, segment.name, "file_overlap_warning",
+                {"overlapping_segments": {k: v[:10] for k, v in overlapping.items()}},
+            )
+            logger.debug(
+                "Segment '%s' may overlap with: %s",
+                segment.name, list(overlapping.keys()),
+            )
+
+    async def _record_touched_paths(self, segment: SegmentConfig) -> None:
+        """Record files touched by the latest commit into the DB."""
+        try:
+            touched = await get_touched_paths(self.repo)
+            self.db.update_segment_ship_info(
+                run_id=self.run_id,
+                name=segment.name,
+                commit_sha=segment.commit or "",
+                tag=segment.tag or "",
+                deploy_url=segment.deploy_url or "",
+                touched_paths=touched,
+            )
+        except Exception as e:
+            logger.warning("Failed to record touched paths for '%s': %s", segment.name, e)
 
     async def _ship_and_verify(self, segment: SegmentConfig) -> ShipResult:
         from .ship_utils import ship_and_verify
@@ -350,6 +497,17 @@ class Orchestrator:
             )
         except Exception as e:
             logger.error("Optimization for '%s' failed: %s", segment.name, e)
+
+    async def _auto_reflect(self) -> None:
+        """Run the meta-reflection loop if auto_run is enabled."""
+        try:
+            from .loops.reflect import run_reflect_loop
+            depth = self.config.reflection.history_depth
+            report = await run_reflect_loop(self.db, depth=depth)
+            if report.recommendations:
+                self.reporter._print("\n🪞 Reflection complete — recommendations generated")
+        except Exception as e:
+            logger.warning("Auto-reflect failed: %s", e)
 
     def get_status(self) -> list[dict]:
         return [

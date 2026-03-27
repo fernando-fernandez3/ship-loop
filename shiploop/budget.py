@@ -34,13 +34,29 @@ class UsageRecord(BaseModel):
 
 
 class BudgetTracker:
-    def __init__(self, config: BudgetConfig, metrics_dir: Path):
+    """Token/cost tracker.
+
+    v5.0: Backed by SQLite when a `db` is supplied.  Falls back to JSON
+    metrics.json for backward compatibility when no db is given.
+    """
+
+    def __init__(
+        self,
+        config: BudgetConfig,
+        metrics_dir: Path,
+        db: "Database | None" = None,
+        run_id: str | None = None,
+    ):
         self.config = config
         self.metrics_file = metrics_dir / "metrics.json"
+        self.db = db
+        self.run_id = run_id
         self.records: list[UsageRecord] = []
-        self._load()
 
-    def _load(self) -> None:
+        if self.db is None:
+            self._load_json()
+
+    def _load_json(self) -> None:
         if self.metrics_file.exists():
             try:
                 data = json.loads(self.metrics_file.read_text())
@@ -49,7 +65,7 @@ class BudgetTracker:
                 logger.warning("Failed to load metrics: %s", e)
                 self.records = []
 
-    def _save(self) -> None:
+    def _save_json(self) -> None:
         self.metrics_file.parent.mkdir(parents=True, exist_ok=True)
         data = {"records": [r.model_dump() for r in self.records]}
         content = json.dumps(data, indent=2)
@@ -76,26 +92,67 @@ class BudgetTracker:
     def record_usage(self, record: UsageRecord) -> None:
         if not record.timestamp:
             record.timestamp = datetime.now(timezone.utc).isoformat()
-        self.records.append(record)
-        self._save()
+
+        if self.db is not None:
+            self.db.record_usage(
+                run_id=self.run_id,
+                segment=record.segment,
+                loop=record.loop,
+                tokens_in=record.tokens_in,
+                tokens_out=record.tokens_out,
+                estimated_cost_usd=record.estimated_cost_usd,
+                duration_seconds=record.duration_seconds,
+            )
+        else:
+            self.records.append(record)
+            self._save_json()
 
     def get_segment_cost(self, segment: str) -> float:
+        if self.db is not None:
+            return self.db.get_segment_cost(segment)
         return sum(r.estimated_cost_usd for r in self.records if r.segment == segment)
 
     def get_run_cost(self) -> float:
+        if self.db is not None and self.run_id:
+            return self.db.get_run_cost(self.run_id)
+        if self.db is not None:
+            return self.db.get_total_cost()
         return sum(r.estimated_cost_usd for r in self.records)
 
     def check_optimization_budget(self, segment: str) -> bool:
-        optimization_cost = sum(
-            r.estimated_cost_usd for r in self.records
-            if r.segment == segment and r.loop.startswith("optimize-")
-        )
+        if self.db is not None:
+            records = self.db.get_usage_records(segment=segment)
+            optimization_cost = sum(
+                r["estimated_cost_usd"] for r in records
+                if r["loop"].startswith("optimize-")
+            )
+        else:
+            optimization_cost = sum(
+                r.estimated_cost_usd for r in self.records
+                if r.segment == segment and r.loop.startswith("optimize-")
+            )
         return optimization_cost < self.config.optimization_budget_usd
 
     def get_segment_tokens(self, segment: str) -> int:
+        if self.db is not None:
+            records = self.db.get_usage_records(segment=segment)
+            return sum(r["tokens_in"] + r["tokens_out"] for r in records)
         return sum(r.tokens_in + r.tokens_out for r in self.records if r.segment == segment)
 
     def get_summary(self) -> dict:
+        if self.db is not None:
+            records = self.db.get_usage_records()
+            by_segment: dict[str, float] = {}
+            for r in records:
+                by_segment[r["segment"]] = by_segment.get(r["segment"], 0.0) + r["estimated_cost_usd"]
+            total = sum(by_segment.values())
+            return {
+                "total_cost_usd": total,
+                "total_records": len(records),
+                "by_segment": by_segment,
+                "budget_remaining_usd": self.config.max_usd_per_run - total,
+            }
+
         by_segment: dict[str, float] = {}
         for r in self.records:
             by_segment[r.segment] = by_segment.get(r.segment, 0.0) + r.estimated_cost_usd
@@ -136,3 +193,9 @@ def estimate_cost(
     pricing = all_pricing.get(model, all_pricing["default"])
     cost = (tokens_in * pricing["input"] + tokens_out * pricing["output"]) / 1_000_000
     return round(cost, 4)
+
+
+# Avoid circular import
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .db import Database

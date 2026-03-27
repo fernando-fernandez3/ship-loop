@@ -8,7 +8,7 @@ description: >
 metadata:
   openclaw:
     emoji: "🚢"
-    version: "4.0.0"
+    version: "5.0.0"
     requires:
       bins: ["git", "python3"]
       python: ["pyyaml>=6.0", "pydantic>=2.0"]
@@ -21,35 +21,40 @@ metadata:
       - "ship these segments"
 ---
 
-# Ship Loop
+# Ship Loop v5.0 — TARS Convergence
 
-Orchestrate multi-segment feature work as a self-healing pipeline. Three nested loops ensure maximum autonomy: **Loop 1** runs the standard code→preflight→ship→verify chain, **Loop 2** auto-repairs failures via the coding agent, and **Loop 3** spawns experiment branches when repairs stall. A persistent **learnings engine** feeds lessons from past failures into future runs. A **budget tracker** monitors token usage and estimated costs.
+Orchestrate multi-segment feature work as a self-healing pipeline. Three nested loops ensure maximum autonomy: **Loop 1** runs the standard code→preflight→ship→verify chain, **Loop 2** auto-repairs failures via the coding agent, **Loop 3** spawns experiment branches when repairs stall. A **SQLite state backend** provides crash recovery and cross-run analytics. A **verdict router** replaces hardcoded branching with a configurable decision table. A **reflection loop** audits historical effectiveness and auto-generates learnings.
 
-## Architecture: Three Nested Loops
+## Architecture: Three Loops + Event Queue + Verdict Router
 
 ```
-┌─────────────── LOOP 1: Ship Loop ───────────────┐
-│  code → preflight → ship → verify → next        │
-│         │                                        │
-│      on fail                                     │
-│         ▼                                        │
-│  ┌──── LOOP 2: Repair Loop ────┐                │
-│  │  capture context → agent fix │                │
-│  │  → re-preflight (max N)     │                │
-│  │         │                    │                │
-│  │      exhausted               │                │
-│  │         ▼                    │                │
-│  │  ┌── LOOP 3: Meta Loop ──┐  │                │
-│  │  │  meta-analysis         │  │                │
-│  │  │  → N experiment branches│  │                │
-│  │  │  → pick winner → merge │  │                │
-│  │  └────────────────────────┘  │                │
-│  └──────────────────────────────┘                │
-│                                                  │
-│  📚 Learnings Engine: every failure → lesson     │
-│     every run loads relevant lessons into prompt │
-│  💰 Budget Tracker: token/cost tracking per run  │
-└──────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│                  SHIP LOOP v5.0                           │
+│                                                           │
+│  LOOP 1: Ship Loop                                        │
+│  code → preflight → ship → verify → emit(segment_shipped)│
+│          │                                                │
+│       on fail (verdict → action via VerdictRouter)        │
+│          ▼                                                │
+│  LOOP 2: Repair Loop                                      │
+│  capture context → agent fix → re-preflight (max N)      │
+│  ↳ emit events: repair_done | repair_failed               │
+│  ↳ convergence detected → CONVERGED verdict → META        │
+│  ↳ unknown error → record_decision_gap()                  │
+│          │                                                │
+│       exhausted                                           │
+│          ▼                                                │
+│  LOOP 3: Meta Loop                                        │
+│  meta-analysis → N experiment branches → winner → merge   │
+│  ↳ emit: meta_done                                        │
+│                                                           │
+│  🗄  SQLite (tars.db): runs, segments, events, learnings  │
+│  📋  Event Queue: crash recovery via unprocessed events   │
+│  🔀  Verdict Router: configurable verdict→action table    │
+│  📚  Learnings Engine: scored lessons (score tracks use)  │
+│  🪞  Reflect Loop: post-run analysis + recommendations    │
+│  💰  Budget Tracker: token/cost tracking per run          │
+└───────────────────────────────────────────────────────────┘
 ```
 
 ## Security Notice
@@ -62,7 +67,7 @@ Orchestrate multi-segment feature work as a self-healing pipeline. Three nested 
 - Any work that follows: code → preflight → commit → deploy → verify → next
 - When you need checkpointing so progress survives session restarts
 - When you want self-healing: failures auto-repair before asking humans
-- When you want cost visibility across agent invocations
+- When you want cost visibility and learning from past runs
 
 ## Prerequisites
 
@@ -77,34 +82,43 @@ Orchestrate multi-segment feature work as a self-healing pipeline. Three nested 
 pip install pyyaml pydantic
 ```
 
-The CLI lives at `scripts/shiploop` — run directly or add to PATH.
-
 ## CLI Usage
 
 ```bash
+# Core pipeline
 shiploop run              # Start or resume the pipeline
-shiploop status           # Show current state of all segments
+shiploop run --dry-run    # Preview what would happen
+shiploop status           # Show segment states (reads from DB)
 shiploop reset <segment>  # Reset a segment to pending
-shiploop learnings list   # Show all learnings
-shiploop learnings search <query>  # Search learnings
+
+# Learnings
+shiploop learnings list
+shiploop learnings search "dark mode theme toggle"
+
+# Budget
 shiploop budget           # Show cost summary
 
+# v5.0 NEW
+shiploop reflect          # Run meta-reflection on recent run history
+shiploop reflect --depth 20  # Analyze last 20 runs
+shiploop events           # View event history for latest run
+shiploop events <run_id>  # View event history for specific run
+shiploop history          # View past run history from DB
+
 # Options
-shiploop -c /path/to/SHIPLOOP.yml run   # Custom config path
-shiploop -v run                          # Verbose logging
-shiploop --version                       # Show version
+shiploop -c /path/to/SHIPLOOP.yml run
+shiploop -v run           # Verbose logging
+shiploop --version        # Show version (5.0.0)
 ```
 
 ## Pipeline Definition (SHIPLOOP.yml)
-
-### Schema
 
 ```yaml
 project: "Project Name"
 repo: /absolute/path/to/project
 site: https://production-url.com
 branch: pr               # direct-to-main | per-segment | pr
-mode: solo               # solo | team
+mode: solo
 
 agent_command: "claude --print --permission-mode bypassPermissions"
 
@@ -120,7 +134,6 @@ deploy:
   health_endpoint: /api/health
   deploy_header: x-vercel-deployment-url
   timeout: 300
-  script: null            # for custom provider only
 
 repair:
   max_attempts: 3
@@ -135,25 +148,156 @@ budget:
   max_tokens_per_segment: 500000
   halt_on_breach: true
 
-blocked_patterns:
-  - "*.pem"
+# v5.0 NEW: Reflection config
+reflection:
+  enabled: true       # run reflect loop after pipeline
+  auto_run: true      # automatically run, not just on CLI command
+  history_depth: 10   # how many past runs to analyze
+
+# v5.0 NEW: Custom verdict routing
+router:
+  agent_fail: retry      # override default (fail) with retry
+  deploy_fail: fail      # override default (retry) with fail
 
 segments:
   - name: "feature-name"
-    status: pending       # pending | coding | preflight | shipping | verifying
-                          # | repairing | experimenting | shipped | failed
+    status: pending
     prompt: |
       Your coding agent prompt here.
     depends_on: []
-    commit: null
-    deploy_url: null
-    tag: null
-    touched_paths: []     # v3.1: for parallel execution detection
 ```
 
-### Built-in Blocked Patterns
+## SQLite State Backend (v5.0)
 
-Always rejected regardless of config: `.env`, `.env.*`, `*.key`, `*.pem`, `*.p12`, `*.pfx`, `*.secret`, `id_rsa`, `id_ed25519`, `*.keystore`, `credentials.json`, `service-account*.json`, `token.json`, `.npmrc`, `node_modules/`, `__pycache__/`, `.pytest_cache/`, `*.sqlite`, `*.sqlite3`, `.DS_Store`, `learnings.yml`
+State is now stored in `.shiploop/tars.db` (SQLite, WAL mode). SHIPLOOP.yml is config-only.
+
+### Tables
+
+| Table | Purpose |
+|-------|---------|
+| `runs` | Pipeline execution records (id, project, started_at, status, cost) |
+| `segments` | Segment execution records per run (status, commit, touched_paths) |
+| `run_events` | Event queue for crash recovery and audit trail |
+| `learnings` | Failure/success lessons with effectiveness scores |
+| `usage` | Token and cost records per agent invocation |
+| `decision_gaps` | Situations the system didn't know how to handle |
+
+### Event Types
+
+| Event | When emitted |
+|-------|-------------|
+| `agent_started` | Agent invocation begins |
+| `preflight_passed` | All preflight steps pass |
+| `preflight_failed` | Any preflight step fails |
+| `repair_done` | Repair loop succeeded |
+| `repair_failed` | Repair loop failed or exhausted |
+| `meta_done` | Meta loop winner merged |
+| `segment_shipped` | Segment fully complete |
+| `segment_failed` | Segment permanently failed |
+| `deploy_failed` | Deploy or verification failed |
+| `file_overlap_warning` | Segment may touch files changed by prior segment |
+
+**Crash recovery**: On startup, unprocessed events are replayed to restore pipeline state.
+
+## Verdict Router (v5.0)
+
+The orchestrator no longer uses `if/else` chains. Every outcome maps to a `Verdict`, and a `VerdictRouter` maps verdicts to `Action` values.
+
+### Default Routing Table
+
+| Verdict | Default Action |
+|---------|---------------|
+| `success` | `ship` |
+| `preflight_fail` | `repair` |
+| `agent_fail` | `fail` |
+| `deploy_fail` | `retry` |
+| `repair_success` | `ship` |
+| `repair_exhausted` | `meta` |
+| `meta_success` | `ship` |
+| `meta_exhausted` | `fail` |
+| `budget_exceeded` | `fail` |
+| `converged` | `meta` ← skip remaining repairs, jump to meta |
+| `no_changes` | `fail` |
+| `unknown` | `pause_and_alert` |
+
+Override via `router:` section in SHIPLOOP.yml (see above).
+
+## Meta-Reflection Loop (v5.0)
+
+Runs automatically after pipeline completion (when `reflection.auto_run: true`) or manually via `shiploop reflect`.
+
+### What It Analyzes
+
+1. **Repeat failures** — same error_signature across multiple segments/runs
+2. **Repair-heavy segments** — segments that needed >1 repair loop (same error type)
+3. **Efficiency trends** — cost/time per segment trending up or down
+4. **Stale learnings** — learnings with score < 0.3 that haven't helped
+5. **Decision gaps** — situations that triggered `MISSING_DECISION_BRANCH`
+
+### Auto-creates learnings from patterns
+
+If an error signature appears 3+ times across runs, the reflect loop auto-generates a `AUTO-<sig>` learning flagging it for human review.
+
+```bash
+shiploop reflect --depth 20
+
+═════════════════════════════════════════════════════
+🪞  Ship Loop Reflection Report
+   Generated: 2026-03-27T06:30:00Z
+   Runs analyzed: 10
+═════════════════════════════════════════════════════
+
+📊 Efficiency
+   Total cost:     $12.4200
+   Segments run:   8
+   Avg/segment:    $1.5525
+
+🔁 Repeat Failures (2)
+   abc123def456… × 3
+   ...
+
+💡 Recommendations
+   ⚠️  Error signature abc123de… repeated 3× across segments: auth, api, db.
+   📉 2 stale learning(s) (score < 0.3): L002, L004.
+   ✅ No issues detected in recent history. Pipeline looks healthy!
+
+═════════════════════════════════════════════════════
+```
+
+## Playbook Evolution (v5.0)
+
+When a repair fails with an error that doesn't match any existing learning, the system records a `decision_gap`:
+
+```python
+learnings.record_decision_gap(
+    segment="auth",
+    context="Repair exhausted with unmatched error: ...",
+    verdict="repair_exhausted_unknown_error",
+    run_id="...",
+)
+```
+
+Decision gaps surface in `shiploop reflect` output and the `decision_gaps` DB table. Operators use them to add new learnings or router overrides.
+
+## Convergence Detection (v5.0 Enhanced)
+
+**Same-segment**: if two consecutive repair attempts produce the same error hash → `CONVERGED` verdict → router jumps to META (skipping remaining repair attempts).
+
+**Cross-segment**: before starting a segment, the orchestrator checks if any already-shipped segment touched the same files (via `touched_paths` in DB). If overlap detected, a `file_overlap_warning` event is emitted.
+
+## Learnings Scoring (v5.0)
+
+```
+score (default 1.0)
+  +0.1 when injected and segment succeeds first-try
+  -0.2 when injected and segment fails the same way
+```
+
+Search results are sorted by combined keyword-relevance × score. Learnings with `score < 0.3` are flagged as stale in reflection.
+
+```bash
+shiploop learnings list  # shows all learnings with scores
+```
 
 ## State Machine
 
@@ -165,100 +309,9 @@ States per segment:
                   ↘ failed
 ```
 
-State is checkpointed to `SHIPLOOP.yml` after every transition. Any crash can be recovered by re-reading the file.
+SHIPLOOP.yml checkpointed after every transition (for backward compat). SQLite is the primary state store.
 
-## Execution Flow
-
-### 1. Read SHIPLOOP.yml
-
-Find first segment with `status: pending` whose `depends_on` are all `shipped` (DAG evaluation).
-
-### 2. Run the Segment (Loop 1)
-
-1. Load relevant learnings, prepend to prompt
-2. Write prompt to temp file (never shell arguments)
-3. Run `agent_command` with prompt via stdin: `cat prompt.txt | {agent_command}`
-4. Run preflight (build, lint, test in sequence)
-5. If preflight passes → git operations (explicit staging, commit, push, tag)
-6. Verify deployment via configured provider
-7. Mark shipped
-
-### 3. Repair Loop (Loop 2)
-
-Triggered when preflight fails:
-
-1. Capture error output, failed step, segment state
-2. Build REPAIR prompt with full failure context
-3. Run agent with repair prompt
-4. Re-run preflight
-5. If passes → back to ship flow
-6. Error signature convergence: if two consecutive attempts produce the same error hash, stop early
-7. If max attempts reached → escalate to Loop 3
-
-### 4. Meta Loop (Loop 3)
-
-Triggered when repair exhausts all attempts:
-
-1. Discard uncommitted changes
-2. Collect ALL failure context
-3. Run agent with META-ANALYSIS prompt
-4. Parse experiment descriptions from `---APPROACH N---` markers
-5. For each experiment:
-   - Create git worktree
-   - Run agent with experiment prompt
-   - Run preflight
-   - Record pass/fail + diff size
-6. Pick winner: first passing, simplest diff as tiebreaker
-7. Merge winner, clean up experiment branches
-8. Continue with ship flow
-9. If NO experiments pass → mark segment `failed`
-
-### 5. Chain Continuation
-
-After a segment ships, immediately find and start the next eligible segment.
-
-## Learnings Engine
-
-Every failure-then-fix cycle writes a lesson to `learnings.yml`:
-
-```yaml
-- id: L001
-  date: "2026-03-23"
-  segment: "dark-mode"
-  error_signature: "abc123def456"
-  failure: "Build failed: Cannot find module './ThemeToggle'"
-  root_cause: "Fixed by repair loop attempt 2"
-  fix: "Repair agent auto-fixed on attempt 2"
-  tags: ["build", "import", "module", "component"]
-```
-
-On every run, relevant learnings (matched by keyword scoring against the prompt) are prepended to the agent's prompt.
-
-### CLI Access
-
-```bash
-shiploop learnings list
-shiploop learnings search "dark mode theme toggle"
-```
-
-## Budget Tracking
-
-Token usage and estimated costs are tracked per agent invocation in `.shiploop/metrics.json`.
-
-```bash
-shiploop budget
-```
-
-Configuration:
-- `max_usd_per_segment` — halt if a single segment exceeds this
-- `max_usd_per_run` — halt if the entire run exceeds this
-- `halt_on_breach` — set `false` to warn but continue
-
-Cost is estimated from token counts parsed from agent output.
-
-## Deploy Verification
-
-### Providers
+## Deploy Providers
 
 | Provider | How it works |
 |----------|-------------|
@@ -266,24 +319,24 @@ Cost is estimated from token counts parsed from agent output.
 | `netlify` | Polls routes for HTTP 200, checks `x-nf-request-id` header |
 | `custom` | Runs `deploy.script` with `SHIPLOOP_COMMIT` and `SHIPLOOP_SITE` env vars |
 
-## Rollback
+## Budget Tracking
 
-Every successful deploy is tagged `shiploop/<segment-name>/<timestamp>`.
+Token usage and estimated costs tracked per agent invocation in SQLite (falls back to `metrics.json`).
 
 ```bash
-# Revert to last known good
-git checkout <last_good_tag> && git push origin HEAD:main --force
+shiploop budget
 
-# Or revert just the bad commit
-git revert <bad_commit> && git push
+💰 Budget Summary: Portfolio
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Total cost:       $3.84
+  Budget remaining: $46.16
+  Total records:    12
+
+  By segment:
+    dark-mode: $0.42
+    contact-form: $3.42
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
-
-## Crash Recovery
-
-On startup, the orchestrator checks for segments in active states (`coding`, `repairing`, `experimenting`, etc.):
-- Active segments are marked `failed`
-- A warning is displayed
-- The pipeline continues with the next eligible segment
 
 ## Critical Rules
 
@@ -291,7 +344,7 @@ On startup, the orchestrator checks for segments in active states (`coding`, `re
 2. **Preflight is mandatory** — no exceptions, no "ship now fix later"
 3. **Explicit staging only** — never `git add -A`, only changed files from `git diff`
 4. **Prompts via file** — never shell arguments (prevents injection)
-5. **Checkpoint everything** — write to SHIPLOOP.yml after every state change
+5. **SQLite is source of truth** — SHIPLOOP.yml config-only; runtime state in `tars.db`
 6. **Agent command from config** — always read from `agent_command`, never hardcode
 7. **Budget-aware** — track costs, enforce limits, fail gracefully
 
@@ -299,147 +352,60 @@ On startup, the orchestrator checks for segments in active states (`coding`, `re
 
 ```
 skills/ship-loop/
-├── SKILL.md              # This file
-├── scripts/
-│   ├── shiploop          # Python CLI entry point (executable)
-│   ├── run-segment.sh    # Legacy bash orchestrator
-│   ├── preflight.sh      # Legacy bash preflight
-│   ├── ship.sh           # Legacy bash ship
-│   ├── verify-deploy.sh  # Legacy bash verify
-│   ├── repair.sh         # Legacy bash repair
-│   ├── meta-experiment.sh # Legacy bash meta
-│   └── learnings.sh      # Legacy bash learnings
-├── src/
-│   ├── __init__.py
-│   ├── cli.py            # CLI interface (argparse)
-│   ├── config.py         # SHIPLOOP.yml parsing + validation (Pydantic v2)
-│   ├── orchestrator.py   # Main state machine + segment runner
-│   ├── loops/
-│   │   ├── ship.py       # Loop 1: code → preflight → ship → verify
-│   │   ├── repair.py     # Loop 2: capture error → agent fix → retry
-│   │   └── meta.py       # Loop 3: meta-analysis → experiments → pick winner
-│   ├── preflight.py      # Build + lint + test runner
-│   ├── git_ops.py        # All git operations (explicit staging, tags, worktrees)
-│   ├── deploy.py         # Deploy verification (plugin system)
-│   ├── budget.py         # Cost/token tracking + budget enforcement
-│   ├── learnings.py      # Learnings engine (record + load + keyword search)
-│   └── reporting.py      # Status messages + post-run reports
+├── SKILL.md                  # This file
+├── pyproject.toml
+├── shiploop/
+│   ├── __init__.py           # __version__ = "5.0.0"
+│   ├── cli.py                # CLI (run, status, reset, reflect, events, history, ...)
+│   ├── config.py             # SHIPLOOP.yml parsing + validation (Pydantic v2)
+│   ├── orchestrator.py       # Main state machine + event queue + verdict routing
+│   ├── db.py                 # NEW: SQLite state backend (tars.db)
+│   ├── router.py             # NEW: Verdict→Action router
+│   ├── learnings.py          # Learnings engine (SQLite + scoring + decision gaps)
+│   ├── budget.py             # Cost/token tracking (SQLite backend)
+│   ├── git_ops.py            # git operations + get_touched_paths()
+│   ├── agent.py              # Agent runner
+│   ├── deploy.py             # Deploy verification
+│   ├── preflight.py          # Build + lint + test runner
+│   ├── reporting.py          # Status messages + reports
+│   ├── ship_utils.py         # Ship and verify helper
+│   └── loops/
+│       ├── ship.py           # Loop 1: code → preflight → ship
+│       ├── repair.py         # Loop 2: repair + decision gap detection
+│       ├── meta.py           # Loop 3: meta-analysis + experiments
+│       ├── reflect.py        # NEW: post-run reflection + recommendations
+│       └── optimize.py       # Optimization loop
 ├── providers/
-│   ├── base.py           # Abstract DeployVerifier
-│   ├── vercel.py         # Vercel verification
-│   ├── netlify.py        # Netlify verification
-│   └── custom.py         # Custom script provider
-├── requirements.txt
+│   ├── vercel.py
+│   ├── netlify.py
+│   └── custom.py
 └── tests/
     ├── test_config.py
     ├── test_orchestrator.py
     ├── test_git_ops.py
-    └── test_budget.py
+    ├── test_budget.py
+    ├── test_learnings.py
+    └── ...
 ```
 
-## Worked Example
+## Changelog
 
-### SHIPLOOP.yml
+### v5.0.0 (2026-03-27) — TARS Convergence
 
-```yaml
-project: "Portfolio"
-repo: /home/user/portfolio
-site: https://portfolio.vercel.app
-agent_command: "claude --print --permission-mode bypassPermissions"
+- **SQLite state backend**: `tars.db` replaces `metrics.json` + `learnings.yml` for runtime state
+- **Event queue**: all phase transitions emit events; unprocessed events enable crash recovery
+- **Verdict router**: configurable `Verdict → Action` table replaces if/else chains in orchestrator
+- **Meta-reflection loop**: `shiploop reflect` analyzes run history, finds patterns, auto-generates learnings
+- **Playbook evolution**: `MISSING_DECISION_BRANCH` detection → `decision_gaps` table
+- **Cross-segment convergence**: `touched_paths` tracked per segment for overlap warnings
+- **Learnings scoring**: score field (+0.1 on success, -0.2 on failure), sorted by score
+- **New CLI commands**: `reflect`, `events`, `history`
+- **New config sections**: `reflection`, `router`
 
-repair:
-  max_attempts: 3
-meta:
-  enabled: true
-  experiments: 3
+### v4.0.0
 
-preflight:
-  build: "npm run build"
-  lint: "npx eslint . --max-warnings 0"
-  test: "npm test -- --passWithNoTests"
-
-deploy:
-  provider: vercel
-  routes: [/, /projects]
-  deploy_header: x-vercel-deployment-url
-
-budget:
-  max_usd_per_segment: 10.0
-  max_usd_per_run: 50.0
-
-segments:
-  - name: "dark-mode"
-    status: pending
-    prompt: |
-      Add dark mode with CSS custom properties and a toggle button.
-    depends_on: []
-  - name: "contact-form"
-    status: pending
-    prompt: |
-      Add contact form at /contact with serverless API endpoint.
-    depends_on: [dark-mode]
-```
-
-### Execution: Happy Path + Repair + Meta
-
-```
-🚢 Ship Loop: Portfolio (2 segments)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🔄 Segment 1/2: dark-mode
-   📚 No prior learnings
-   🤖 coding... (0s)
-   ✅ Agent completed in 262s
-   🛫 preflight... (4m 22s)
-   ✅ Preflight passed
-   📦 Committed: a1b2c3d
-   🏷  Tagged: shiploop/dark-mode/20260323-001500
-   ✅ Deploy verified
-✅ Segment 1/2: dark-mode — shipped (a1b2c3d) [7m 30s, $0.42]
-
-🔄 Segment 2/2: contact-form
-   📚 Loaded 1 relevant learning(s)
-   🤖 coding... (0s)
-   ✅ Agent completed in 310s
-   ❌ Preflight FAILED — entering repair loop
-   🔧 Repair attempt 1/3
-   ❌ Repair 1 failed: lint errors
-   🔧 Repair attempt 2/3
-   ❌ Repair 2 failed: test errors
-   🔧 Repair attempt 3/3
-   ❌ Repair 3 failed: build error
-   ❌ Repair loop exhausted (3 attempts)
-   🧪 Entering meta loop...
-   🧠 Running meta-analysis...
-   ✅ Meta-analysis complete
-   🧪 Experiment 1/3
-   ❌ Experiment 1 failed
-   🧪 Experiment 2/3
-   ✅ Experiment 2 passed (diff: 12 lines)
-   🧪 Experiment 3/3
-   ✅ Experiment 3 passed (diff: 18 lines)
-   🏆 Winner: experiment 2 (branch: experiment/contact-form-2)
-   ✅ Winner merged, experiment branches cleaned
-   📦 Committed: e5f6g7h
-   🏷  Tagged: shiploop/contact-form/20260323-003200
-   ✅ Deploy verified
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🏁 Ship loop complete! 2/2 segments shipped.
-   Total time: 25m 10s
-   Total cost: $3.84
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
-## v3.1 Changes from v3.0
-
-- **Python CLI** replaces bash scripts as the primary interface
-- **Pydantic v2** config validation with typed models
-- **Budget tracking** — token/cost monitoring with per-segment and per-run limits
-- **Enhanced state machine** — explicit states (coding, preflight, shipping, verifying, repairing, experimenting) with checkpoint after every transition
-- **DAG-aware scheduling** — parallel segment detection via `touched_paths`
-- **Error convergence detection** — hash-based comparison of consecutive repair errors
-- **Learnings keyword scoring** — weighted tag/keyword matching for relevant lesson retrieval
-- **Deploy provider plugins** — Vercel, Netlify, Custom script with abstract base
-- **Crash recovery** — automatic detection and marking of active-state segments on startup
-- **Legacy bash scripts preserved** in `scripts/` for reference
+- Python CLI replaces bash scripts
+- Pydantic v2 config validation
+- Budget tracking with per-segment and per-run limits
+- Error convergence detection (hash-based)
+- Deploy provider plugins (Vercel, Netlify, Custom)
